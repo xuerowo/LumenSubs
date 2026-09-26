@@ -2,6 +2,8 @@
 apikey.txt
 workspace/
 .env
+.venv/
+ffmpeg/
 
 # design prototype (not part of the app)
 prototype/

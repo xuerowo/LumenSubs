@@ -10,7 +10,7 @@ opencc                 # zh-TW / zh-CN script safety net (optional)
 
 # Speech recognition (Qwen3-ASR-1.7B + Qwen3-ForcedAligner-0.6B)
 qwen-asr>=0.0.6
-torch                  # install the CUDA build matching your GPU, see https://pytorch.org
+torch                  # start.bat installs the CUDA build matching your GPU automatically
 transformers>=4.57
 accelerate
 soundfile

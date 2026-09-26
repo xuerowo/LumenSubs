@@ -10,17 +10,32 @@
 - 字幕樣式（字型、字級、字重、顏色、描邊、陰影、圓角底框）與位置可調，可直接在畫面上拖曳
 - 自動偵測原文語言（30 種），可翻譯為 33 種語言
 
-## 啟動
+## 安裝與啟動（Windows）
 
-```bat
-start.bat
-```
+**事前準備**：安裝 [Python 3.10–3.13](https://www.python.org/downloads/)（建議 3.12，安裝時勾選「Add python.exe to PATH」）。
+建議使用 NVIDIA 顯示卡（CPU 也能執行但轉錄非常慢）。
 
-或 `python run.py`。會啟動本機伺服器（預設 `http://127.0.0.1:8765`）並以 Edge/Chrome 應用程式視窗開啟。
-首次啟動會在背景載入模型（右上角狀態燈由黃轉綠即就緒）。
+下載或 `git clone` 本專案後，**雙擊 `start.bat`** 即可。第一次執行會自動：
 
-需求：Python 3.10+、NVIDIA GPU（建議，CPU 亦可但很慢）、FFmpeg（需在 PATH）。套件見 `requirements.txt`。
-DeepSeek API Key 會自動讀取專案根目錄的 `apikey.txt`，也可在「設定」中修改。
+1. 在專案內建立獨立的虛擬環境 `.venv`（不影響系統的 Python）
+2. 偵測顯示卡驅動，安裝對應的 **CUDA 版 PyTorch**（無 NVIDIA 顯示卡則安裝 CPU 版）
+3. 安裝其餘套件
+4. 檢查 FFmpeg，沒有的話詢問是否用 `winget` 自動安裝
+5. 下載語音模型 Qwen3-ASR-1.7B、Qwen3-ForcedAligner-0.6B、Silero VAD（約 4.5 GB）
+
+首次安裝視網速約需 10–30 分鐘；之後再執行 `start.bat` 只做快速檢查，數秒內啟動。
+程式會啟動本機伺服器（`http://127.0.0.1:8765`）並以 Edge／Chrome 應用程式視窗開啟。
+
+**DeepSeek API Key**：啟動後到右上角「設定 → 翻譯」填入（或在專案根目錄放一個內容為 key 的 `apikey.txt`）。
+
+| 參數 | 用途 |
+|---|---|
+| `start.bat --reinstall` | 重新安裝所有套件（例如更新顯示卡驅動後） |
+| `start.bat --cpu` | 強制使用 CPU 版 PyTorch |
+| `start.bat --no-browser` | 只啟動伺服器，不開視窗 |
+
+無法連線 huggingface.co 時，可先設定環境變數 `HF_ENDPOINT` 使用鏡像站再執行。
+手動安裝：`pip install -r requirements.txt`（PyTorch 請依 [pytorch.org](https://pytorch.org) 安裝 CUDA 版），再執行 `python run.py`。
 
 ## 品質設計
 
@@ -70,3 +85,7 @@ workspace/          專案資料（自動建立）
 ## 快捷鍵
 
 Space 播放／暫停 · ←/→ 1 秒（Shift 5 秒）· ↑/↓ 上下句 · S 分割 · W 展開時間軸 · Del 刪除 · Ctrl+Z/Y 復原／重做 · Ctrl+E 匯出 · Ctrl+滾輪 縮放時間軸
+
+## 授權
+
+[MIT](LICENSE)。語音模型 Qwen3-ASR / Qwen3-ForcedAligner 採 Apache-2.0，Silero VAD 採 MIT，使用 DeepSeek API 需遵守其服務條款。
