@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LumenSubs 字幕工作室</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233b8bff'/%3E%3Cstop offset='1' stop-color='%2319c8ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Cpath d='M7 15h4M14 15h3M7 11h2M12 11h5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700;900&family=Noto+Serif+TC:wght@500;700;900&family=LXGW+WenKai+TC:wght@400;700&family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Sans+Thai:wght@400;500;700;900&family=Noto+Sans+Arabic:wght@400;500;700;900&family=Noto+Sans+Hebrew:wght@400;500;700;900&family=Noto+Sans+Devanagari:wght@400;500;700;900&family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+<div class="bg"><div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div><div class="grid"></div></div>
+
+<div class="app">
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar panel">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24" class="svg"><rect width="18" height="14" x="3" y="5" rx="3"/><path d="M7 15h4M14 15h3M7 11h2M12 11h5"/></svg></div>
+      <div><div class="brand-name">Lumen<span>Subs</span></div><div class="brand-sub">AI 字幕翻譯工作室</div></div>
+    </div>
+    <div class="proj">
+      <button class="icon-btn sm" id="projBtn" data-tip="專案"><svg class="svg" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button>
+      <input id="projName" value="未命名專案" spellcheck="false" maxlength="80">
+      <span class="saved" id="savedTag"><i></i><em>尚未儲存</em></span>
+    </div>
+    <div class="top-actions">
+      <button class="icon-btn" id="undoBtn" data-tip="復原 Ctrl+Z" disabled><svg class="svg" viewBox="0 0 24 24"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/></svg></button>
+      <button class="icon-btn" id="redoBtn" data-tip="重做 Ctrl+Y" disabled><svg class="svg" viewBox="0 0 24 24"><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0 1 9-9 9 9 0 0 1 6 2.3l3 2.7"/></svg></button>
+      <button class="icon-btn" id="kbdBtn" data-tip="快捷鍵"><svg class="svg" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M7 13h.01M17 13h.01M9 16h6"/></svg></button>
+      <div class="sep"></div>
+      <div class="model-pill loading" id="modelPill" data-tip="模型載入中"><span class="dot"></span><span id="modelTxt">Qwen3-ASR · DeepSeek</span></div>
+      <button class="icon-btn" id="settingsBtn" data-tip="設定"><svg class="svg" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/></svg></button>
+      <button class="btn primary" id="exportBtn"><svg class="svg" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg><span>匯出</span></button>
+    </div>
+  </header>
+
+  <!-- ============ LEFT ============ -->
+  <aside class="left panel">
+    <div class="scroll" style="flex:1">
+      <div class="sec">
+        <div class="sec-title">工作模式</div>
+        <div class="seg" id="modeSeg">
+          <button data-v="video" class="on"><svg class="svg" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18M17 3v18M3 7.5h4M3 12h18M3 16.5h4M17 7.5h4M17 16.5h4"/></svg>影片翻譯</button>
+          <button data-v="audio"><svg class="svg" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>音訊製片</button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-title">素材</div>
+        <div id="srcVideo" class="stack">
+          <label class="drop" id="dropVideo">
+            <input type="file" accept="video/*,.mkv,.avi,.flv,.wmv,.ts,.mts,.m2ts" id="fileVideo">
+            <div class="drop-ic"><svg class="svg" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5M12 3v12"/></svg></div>
+            <b>拖放或點擊上傳影片</b><small>MP4 · MOV · MKV · WebM · AVI</small>
+          </label>
+          <div class="file-card" id="videoCard" hidden>
+            <div class="file-thumb"><svg class="svg" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18M17 3v18M3 12h18"/></svg></div>
+            <div class="file-meta"><b id="videoName"></b><small id="videoInfo"></small></div>
+            <div class="ring" id="videoRing"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15"/><circle class="v" cx="18" cy="18" r="15"/></svg></div>
+          </div>
+        </div>
+        <div id="srcAudio" class="stack" style="display:none">
+          <label class="drop compact" id="dropAudio">
+            <input type="file" accept="audio/*,.m4a,.flac,.opus,.wma,.aiff,.amr" id="fileAudio">
+            <div class="drop-ic"><svg class="svg" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+            <div class="drop-txt"><b id="audioName">上傳音訊</b><small id="audioInfo">MP3 · WAV · M4A · FLAC</small></div>
+            <div class="ring" id="audioRing"><svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15"/><circle class="v" cx="18" cy="18" r="15"/></svg></div>
+          </label>
+          <label class="drop compact" id="dropImg">
+            <input type="file" accept="image/*" id="fileImg">
+            <div class="drop-ic" id="imgThumb"><svg class="svg" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg></div>
+            <div class="drop-txt"><b id="imgName">上傳背景圖</b><small id="imgInfo">未上傳時使用預設漸層背景</small></div>
+          </label>
+          <div class="field">
+            <div class="lbl">畫面比例</div>
+            <div class="seg sm" id="arSeg">
+              <button data-v="16:9" class="on">16:9</button><button data-v="9:16">9:16</button><button data-v="1:1">1:1</button><button data-v="4:3">4:3</button>
+            </div>
+          </div>
+          <div class="toggle-row" data-toggle="viz">音訊律動動畫 <span class="sw on"></span></div>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-title"><svg class="svg" viewBox="0 0 24 24"><path d="m5 8 6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6"/></svg>語言</div>
+        <div class="field">
+          <div class="lbl">原文語言</div>
+          <button class="select" id="srcLang"></button>
+          <div id="detectBadge"></div>
+        </div>
+        <div class="swap-row"><button class="swap-btn" id="swapLang" data-tip="互換語言"><svg class="svg" viewBox="0 0 24 24"><path d="m16 3 4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/></svg></button></div>
+        <div class="field">
+          <div class="lbl">翻譯為</div>
+          <button class="select" id="tgtLang"></button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <div class="sec-title">翻譯偏好</div>
+        <div class="field">
+          <div class="lbl">語氣風格</div>
+          <div class="chips" id="toneChips">
+            <button class="chip on" data-v="natural">自然口語</button>
+            <button class="chip" data-v="formal">正式書面</button>
+            <button class="chip" data-v="concise">精簡字幕</button>
+            <button class="chip" data-v="literal">貼近原文</button>
+          </div>
+        </div>
+        <div class="toggle-row" data-toggle="keepNames">保留專有名詞原文 <span class="sw on"></span></div>
+        <div class="toggle-row" data-toggle="context">結合全文脈絡翻譯 <span class="sw on"></span></div>
+        <div class="toggle-row" data-toggle="proofread">AI 校正辨識錯字 <span class="sw on"></span></div>
+        <div class="toggle-row" data-toggle="balance">長句平衡斷行 <span class="sw on"></span></div>
+      </div>
+    </div>
+
+    <div class="gen-wrap">
+      <div class="gen-row">
+        <button class="btn primary lg" id="genBtn"><i class="gen-fill"></i><svg class="svg gen-ic" viewBox="0 0 24 24"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 3v4M17 5h4"/></svg><span id="genTxt">生成字幕</span></button>
+        <button class="btn ghost lg sq" id="retrBtn" data-tip="以目前原文重新翻譯全部" hidden><svg class="svg" viewBox="0 0 24 24"><path d="m5 8 6 6M4 14l6-6 2-3M2 5h12M7 2h1M22 22l-5-10-5 10M14 18h6"/></svg></button>
+        <button class="btn ghost lg sq" id="cancelBtn" data-tip="取消" hidden><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="stCount">0</b><small>字幕句數</small></div>
+        <div class="stat"><b id="stDur">00:00</b><small>總長度</small></div>
+        <div class="stat"><b id="stChars">0</b><small>譯文字數</small></div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ CENTER ============ -->
+  <main class="center">
+    <section class="viewer panel">
+      <div class="stage-wrap" id="stageWrap">
+        <div class="stage paused empty" id="stage">
+          <video id="video" playsinline preload="auto"></video>
+          <div class="audio-scene" id="audioScene"><canvas id="bgCv"></canvas><div class="viz" id="viz"></div></div>
+          <canvas class="subcv" id="subCv"></canvas>
+          <div class="empty-state" id="emptyState">
+            <div class="es-orb"><svg class="svg" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5M12 3v12"/></svg></div>
+            <b id="esTitle">拖放影片到這裡開始</b>
+            <small id="esSub">自動轉錄、翻譯並生成雙語字幕</small>
+          </div>
+          <div class="track-chip" id="trackChip"><svg class="svg" viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg><span id="trackTitle"></span></div>
+          <div class="guides" id="guides"><div class="safe"></div><div class="vc" id="vGuide"></div></div>
+          <div class="big-play"><svg class="svg" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21"/></svg></div>
+          <div class="subs" id="subs"></div>
+          <div class="busy-veil" id="busyVeil"><div class="bv-card"><div class="bv-ring"><svg viewBox="0 0 44 44"><circle cx="22" cy="22" r="19"/><circle class="v" cx="22" cy="22" r="19"/></svg><span id="bvPct">0%</span></div><b id="bvTxt">AI 處理中</b></div></div>
+          <div class="stage-hint">拖曳字幕可調整位置 · 點擊畫面播放／暫停</div>
+          <div class="pos-badge" id="posBadge" style="display:none"></div>
+        </div>
+      </div>
+      <audio id="audio" preload="auto"></audio>
+      <div class="transport">
+        <div class="tp-group">
+          <button class="icon-btn" id="prevCue" data-tip="上一句 ↑"><svg class="svg" viewBox="0 0 24 24"><polygon points="19 20 9 12 19 4 19 20"/><path d="M5 19V5"/></svg></button>
+          <button class="play-btn" id="playBtn"><svg class="svg i-play" viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21"/></svg></button>
+          <button class="icon-btn" id="nextCue" data-tip="下一句 ↓"><svg class="svg" viewBox="0 0 24 24"><polygon points="5 4 15 12 5 20 5 4"/><path d="M19 5v14"/></svg></button>
+        </div>
+        <div class="tc-now" id="tcNow">00:00.000 <span>/ 00:00.000</span></div>
+        <div class="tp-spacer"></div>
+        <div class="seg sm" id="dispSeg" style="width:210px">
+          <button data-v="dual" class="on">雙語</button><button data-v="tgt">譯文</button><button data-v="src">原文</button>
+        </div>
+        <button class="speed" id="speedBtn" data-tip="播放速度">1.0×</button>
+        <div class="vol"><button class="icon-btn sm" id="muteBtn"><svg class="svg" viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg></button><input type="range" id="vol" min="0" max="1" step="0.01" value="0.8"></div>
+        <button class="icon-btn" id="fsBtn" data-tip="全螢幕"><svg class="svg" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+      </div>
+    </section>
+
+    <section class="timeline panel">
+      <div class="tl-head">
+        <div class="t"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>時間軸</div>
+        <div class="tl-sel" id="tlSel">拖曳字幕塊移動 · 拖曳邊緣調整長度</div>
+        <div class="tp-spacer"></div>
+        <button class="icon-btn sm" id="tlAdd" data-tip="在播放頭插入字幕"><svg class="svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+        <button class="icon-btn sm" id="tlSplit" data-tip="於播放頭分割 S"><svg class="svg" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.1 15.9M14.5 14.5 20 20M8.1 8.1 12 12"/></svg></button>
+        <div class="sep"></div>
+        <div class="zoom"><svg class="svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M8 11h6"/></svg><input type="range" id="zoom" min="0" max="1000" value="600"><svg class="svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3M8 11h6M11 8v6"/></svg></div>
+        <button class="icon-btn sm" id="tlWide" data-tip="左右展開時間軸 W"><svg class="svg" viewBox="0 0 24 24"><path d="m18 8 4 4-4 4M6 8l-4 4 4 4M2 12h20"/></svg></button>
+        <button class="icon-btn sm" id="tlFit" data-tip="符合寬度"><svg class="svg" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+      </div>
+      <div class="tl-body">
+        <div class="tl-labels"><div style="height:27px"></div><div style="height:57px">波形</div><div style="flex:1">字幕</div></div>
+        <div class="tl-scroll scroll" id="tlScroll">
+          <div class="tl-inner" id="tlInner">
+            <div class="ruler" id="ruler"><canvas id="rulerCv"></canvas></div>
+            <div class="wave" id="wave"><canvas id="waveCv"></canvas><div class="played" id="played"></div></div>
+            <div class="track" id="track"></div>
+            <div class="playhead" id="playhead"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ============ RIGHT ============ -->
+  <aside class="right panel">
+    <div class="rp-head">
+      <div class="seg" id="tabSeg">
+        <button data-v="cues" class="on"><svg class="svg" viewBox="0 0 24 24"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M15 15h2M7 11h2M13 11h4"/></svg>字幕對照</button>
+        <button data-v="style"><svg class="svg" viewBox="0 0 24 24"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>樣式與位置</button>
+      </div>
+    </div>
+    <div class="rp-body">
+      <div class="tab-page on" id="pageCues">
+        <div class="toolbar">
+          <div class="search"><svg class="svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><input id="q" placeholder="搜尋原文或譯文…"><button class="icon-btn sm" id="qClear" hidden><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+          <label class="follow"><span class="sw on" id="followSw"></span>跟隨播放</label>
+        </div>
+        <div class="offset-bar">
+          <svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>整體時間偏移
+          <span class="grow"></span>
+          <button class="icon-btn sm" id="offMinus"><svg class="svg" viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+          <input id="offset" value="+0.00s">
+          <button class="icon-btn sm" id="offPlus"><svg class="svg" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+          <button class="btn ghost" id="offApply">套用</button>
+        </div>
+        <div class="col-heads"><span><i></i><em id="srcHead" style="font-style:normal">原文</em></span><span><i></i><em id="tgtHead" style="font-style:normal">譯文</em></span></div>
+        <div class="cue-list scroll" id="cueList"></div>
+      </div>
+
+      <div class="tab-page" id="pageStyle">
+        <div class="scroll" style="flex:1">
+          <div class="sec">
+            <div class="sec-title">快速預設</div>
+            <div class="presets" id="presets"></div>
+          </div>
+          <div class="sec">
+            <div class="sec-title">雙語排列</div>
+            <div class="seg" id="dispSeg2"><button data-v="dual" class="on">原文＋譯文</button><button data-v="tgt">僅譯文</button><button data-v="src">僅原文</button></div>
+            <button class="order-btn" id="orderBtn"><svg class="svg" viewBox="0 0 24 24"><path d="m16 3 4 4-4 4M20 7H4M8 21l-4-4 4-4M4 17h16"/></svg><span id="orderTxt">譯文在上，原文在下</span><em>點擊互換</em></button>
+          </div>
+          <div class="sec">
+            <div class="sec-title">文字樣式<span class="aux"></span></div>
+            <div class="seg sm" id="trackSeg" style="margin-bottom:14px"><button data-v="tgt" class="on">譯文字幕</button><button data-v="src">原文字幕</button></div>
+            <div class="field"><div class="lbl">字型</div><button class="select compact" id="fontSel"></button></div>
+            <div class="field"><div class="lbl">字級 <span class="val" data-out="T.size"></span></div><input type="range" data-bind="T.size" min="20" max="110" step="1"></div>
+            <div class="field"><div class="lbl">字重</div>
+              <div class="seg sm" id="weightSeg"><button data-v="400">Regular</button><button data-v="500">Medium</button><button data-v="700" class="on">Bold</button><button data-v="900">Black</button></div>
+            </div>
+            <div class="field"><div class="lbl">文字顏色</div><div class="swatches" id="colorSw" data-key="T.color"></div></div>
+            <div class="row2">
+              <div class="field"><div class="lbl">描邊粗細 <span class="val" data-out="T.stroke"></span></div><input type="range" data-bind="T.stroke" min="0" max="10" step="0.5"></div>
+              <div class="field"><div class="lbl">描邊顏色</div><div class="swatches" id="strokeSw" data-key="T.strokeColor"></div></div>
+            </div>
+          </div>
+          <div class="sec">
+            <div class="sec-title">背景效果</div>
+            <div class="seg sm" id="bgSeg" style="margin-bottom:12px"><button data-v="none">無</button><button data-v="shadow" class="on">柔和陰影</button><button data-v="box">半透明底框</button></div>
+            <div class="box-only" id="boxOpts">
+              <div class="row2">
+                <div class="field"><div class="lbl">底框不透明度 <span class="val" data-out="boxOpacity"></span></div><input type="range" data-bind="boxOpacity" min="0.1" max="1" step="0.05"></div>
+                <div class="field"><div class="lbl">圓角 <span class="val" data-out="radius"></span></div><input type="range" data-bind="radius" min="0" max="30" step="1"></div>
+              </div>
+              <div class="field"><div class="lbl">底框顏色</div><div class="swatches" id="boxSw" data-key="boxColor"></div></div>
+            </div>
+          </div>
+          <div class="sec">
+            <div class="sec-title">位置與排版</div>
+            <div class="field">
+              <div class="pos-btns" id="posBtns">
+                <button class="pos-btn" data-y="8"><span class="mini"><i style="top:5px"></i></span>頂部</button>
+                <button class="pos-btn" data-y="50"><span class="mini"><i style="top:11px"></i></span>中間</button>
+                <button class="pos-btn on" data-y="92"><span class="mini"><i style="bottom:5px"></i></span>底部</button>
+              </div>
+            </div>
+            <div class="row2">
+              <div class="field"><div class="lbl">垂直位置 <span class="val" data-out="posY"></span></div><input type="range" data-bind="posY" min="2" max="98" step="0.5"></div>
+              <div class="field"><div class="lbl">水平位置 <span class="val" data-out="posX"></span></div><input type="range" data-bind="posX" min="10" max="90" step="0.5"></div>
+              <div class="field"><div class="lbl">雙語行距 <span class="val" data-out="gap"></span></div><input type="range" data-bind="gap" min="0" max="40" step="1"></div>
+              <div class="field"><div class="lbl">最大寬度 <span class="val" data-out="maxW"></span></div><input type="range" data-bind="maxW" min="40" max="98" step="1"></div>
+            </div>
+            <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>也可以直接在預覽畫面上拖曳字幕，靠近中線會自動吸附置中。預覽與匯出影片使用同一個渲染器，所見即所得。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<!-- ============ EXPORT MODAL ============ -->
+<div class="modal-bg" id="exportModal">
+  <div class="modal panel">
+    <div class="m-head">
+      <div class="ic"><svg class="svg" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5M12 15V3"/></svg></div>
+      <div><h3>匯出</h3><p>下載字幕檔，或輸出嵌入字幕的影片</p></div>
+      <button class="icon-btn" data-close><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="m-body scroll">
+      <div class="m-sec">
+        <div class="sec-title">輸出位置</div>
+        <div class="field">
+          <div class="lbl">資料夾</div>
+          <div class="path-row">
+            <button class="path-box" id="outDirBox" title="選擇資料夾"><svg class="svg" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span id="outDir">…</span></button>
+            <button class="btn ghost" id="pickDir">選擇資料夾</button>
+          </div>
+        </div>
+        <div class="field">
+          <div class="lbl">檔案名稱 <span class="lbl-note">副檔名依格式自動加上</span></div>
+          <div class="name-row"><input class="inp" id="outName" spellcheck="false" maxlength="120"><span class="ext-chip" id="outExt">.srt · .mp4</span></div>
+          <div class="out-prev" id="outPrev"></div>
+        </div>
+      </div>
+      <div class="m-sec">
+        <div class="sec-title">字幕檔</div>
+        <div class="fmt-grid" id="fmtGrid">
+          <button class="fmt on" data-v="srt"><b>.SRT</b><small>通用格式</small></button>
+          <button class="fmt" data-v="vtt"><b>.VTT</b><small>網頁播放器</small></button>
+          <button class="fmt" data-v="ass"><b>.ASS</b><small>保留樣式</small></button>
+          <button class="fmt" data-v="txt"><b>.TXT</b><small>純文字稿</small></button>
+        </div>
+        <div class="field" style="margin-top:12px">
+          <div class="lbl">內容</div>
+          <div class="seg sm" id="expContent"><button data-v="dual" class="on">雙語</button><button data-v="tgt">僅譯文</button><button data-v="src">僅原文</button></div>
+        </div>
+        <div class="code-prev scroll" id="codePrev"></div>
+      </div>
+      <div class="m-sec">
+        <div class="sec-title">影片輸出<span class="aux" id="encInfo"></span></div>
+        <div class="row2">
+          <div class="field"><div class="lbl">字幕嵌入方式</div><div class="seg sm" id="burnSeg"><button data-v="hard" class="on">燒錄硬字幕</button><button data-v="soft">內封軟字幕</button></div></div>
+          <div class="field"><div class="lbl">解析度</div><div class="seg sm" id="resSeg"><button data-v="src" class="on">原始</button><button data-v="1080">1080p</button><button data-v="720">720p</button></div></div>
+        </div>
+        <div class="field"><div class="lbl">畫質</div><div class="seg sm" id="qSeg"><button data-v="h">高</button><button data-v="m" class="on">標準</button><button data-v="l">小檔案</button></div></div>
+        <div class="hint" id="expHint"></div>
+        <div class="exp-progress" id="expProg" hidden>
+          <div class="ep-bar"><i id="epFill"></i></div>
+          <div class="ep-row"><span id="epTxt">準備中…</span><b id="epPct">0%</b></div>
+        </div>
+        <div class="exp-done" id="expDone" hidden>
+          <div class="ed-ic"><svg class="svg" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg></div>
+          <div class="ed-meta"><b id="edName"></b><small id="edSize"></small></div>
+          <button class="btn ghost" id="edOpen">開啟資料夾</button>
+          <button class="btn primary" id="edPlay"><span>播放</span></button>
+        </div>
+      </div>
+    </div>
+    <div class="m-foot">
+      <button class="btn ghost" id="dlSub"><svg class="svg" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M16 13H8M16 17H8"/></svg>儲存字幕檔</button>
+      <button class="btn primary" id="dlVideo"><svg class="svg" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M7 3v18M17 3v18M3 12h18"/></svg><span id="dlVideoTxt">匯出 MP4 影片</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SETTINGS MODAL ============ -->
+<div class="modal-bg" id="settingsModal">
+  <div class="modal panel">
+    <div class="m-head">
+      <div class="ic"><svg class="svg" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M2 14h4M10 8h4M18 16h4"/></svg></div>
+      <div><h3>設定</h3><p>模型與翻譯服務</p></div>
+      <button class="icon-btn" data-close><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="m-body scroll">
+      <div class="m-sec">
+        <div class="sec-title">語音轉錄（本機）<span class="aux" id="gpuInfo"></span></div>
+        <div class="stack">
+          <div class="model-card"><div class="mi"><svg class="svg" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg></div><div><b>Qwen3-ASR-1.7B</b><small>語音辨識 · 30 種語言 · 自動偵測</small></div><span class="tag" data-mtag></span></div>
+          <div class="model-card"><div class="mi"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div><b>Qwen3-ForcedAligner-0.6B</b><small>強制對齊 · 字級時間戳</small></div><span class="tag" data-mtag></span></div>
+          <div class="row2">
+            <div class="field"><div class="lbl">運算裝置</div><div class="seg sm" id="devSeg"><button data-v="cuda" class="on">CUDA</button><button data-v="cpu">CPU</button></div></div>
+            <div class="field"><div class="lbl">每句最長 <span class="val" id="maxCharOut">42</span></div><input type="range" id="maxChar" min="20" max="84" value="42"></div>
+          </div>
+          <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>每句長度以半形字元計算（中日韓文字每字計 2），影響自動斷句。</div>
+        </div>
+      </div>
+      <div class="m-sec">
+        <div class="sec-title">翻譯（DeepSeek API）</div>
+        <div class="field"><div class="lbl">API Key <span id="keyState" style="font-weight:500;color:var(--ink-3)"></span></div><input class="inp mono" type="password" placeholder="sk-••••••••••••••••" id="apiKey" autocomplete="off"></div>
+        <div class="row2">
+          <div class="field"><div class="lbl">Base URL</div><input class="inp mono" id="baseUrl" value="https://api.deepseek.com"></div>
+          <div class="field"><div class="lbl">模型</div><input class="inp mono" id="modelName" value="deepseek-flash"></div>
+        </div>
+        <div class="field"><div class="lbl">術語表 <span style="font-weight:500;color:var(--ink-3)">每行一組：原文 = 譯文（亦用於提升辨識）</span></div><textarea class="inp mono" rows="3" id="glossary" placeholder="Qwen = Qwen&#10;LumenSubs = LumenSubs"></textarea></div>
+      </div>
+    </div>
+    <div class="m-foot">
+      <button class="btn ghost" id="testApi">測試連線</button>
+      <button class="btn primary" id="saveSettings"><span>儲存</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ SHORTCUTS MODAL ============ -->
+<div class="modal-bg" id="kbdModal">
+  <div class="modal panel" style="width:480px">
+    <div class="m-head">
+      <div class="ic"><svg class="svg" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="5" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M7 13h.01M17 13h.01M9 16h6"/></svg></div>
+      <div><h3>快捷鍵</h3><p>編輯字幕時同樣可用（輸入框內除外）</p></div>
+      <button class="icon-btn" data-close><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="m-body" style="padding-bottom:22px">
+      <div class="kbd-list">
+        <div>播放／暫停 <kbd>Space</kbd></div>
+        <div>後退／前進 1 秒 <span><kbd>←</kbd> <kbd>→</kbd></span></div>
+        <div>後退／前進 5 秒 <span><kbd>Shift ←</kbd> <kbd>→</kbd></span></div>
+        <div>上／下一句 <span><kbd>↑</kbd> <kbd>↓</kbd></span></div>
+        <div>於播放頭分割 <kbd>S</kbd></div>
+        <div>展開／收合時間軸 <kbd>W</kbd></div>
+        <div>刪除選取字幕 <kbd>Del</kbd></div>
+        <div>復原／重做 <span><kbd>Ctrl Z</kbd> <kbd>Ctrl Y</kbd></span></div>
+        <div>時間碼微調 <span><kbd>↑</kbd> <kbd>↓</kbd></span></div>
+        <div>時間軸縮放 <kbd>Ctrl 滾輪</kbd></div>
+        <div>匯出 <kbd>Ctrl E</kbd></div>
+        <div>字幕內換行 <kbd>Shift Enter</kbd></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="pop" id="pop"></div>
+<div class="toasts" id="toasts"></div>
+<script src="/web/render.js"></script>
+<script src="/web/app.js"></script>
+</body>
+</html>

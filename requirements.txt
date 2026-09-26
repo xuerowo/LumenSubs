@@ -1,0 +1,19 @@
+# Core
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+openai>=1.40
+numpy
+pillow
+onnxruntime            # Silero VAD
+opencc                 # zh-TW / zh-CN script safety net (optional)
+
+# Speech recognition (Qwen3-ASR-1.7B + Qwen3-ForcedAligner-0.6B)
+qwen-asr>=0.0.6
+torch                  # install the CUDA build matching your GPU, see https://pytorch.org
+transformers>=4.57
+accelerate
+soundfile
+librosa
+
+# External tools: FFmpeg (with libass) must be on PATH.

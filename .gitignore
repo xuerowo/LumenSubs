@@ -1,0 +1,31 @@
+# secrets & local data
+apikey.txt
+workspace/
+.env
+
+# design prototype (not part of the app)
+prototype/
+
+# python
+__pycache__/
+*.py[cod]
+
+# media / test files
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.mp4
+*.mkv
+*.mov
+*.jpg
+*.jpeg
+*.png
+*.whl
+
+# editors / OS
+.claude/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
