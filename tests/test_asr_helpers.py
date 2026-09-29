@@ -98,8 +98,14 @@ def test_clearly_other_script():
     assert not clearly_other_script("Thank you so much for watching", "English")
 
 
-def test_loop_guard_wraps_generate_and_reports_changed_internals():
-    from types import SimpleNamespace
+def test_loop_guard_wraps_generate_and_reports_changed_internals(monkeypatch):
+    import sys
+    from types import ModuleType, SimpleNamespace
+    # the tests run without the (large) transformers package: a stand-in is enough
+    fake = ModuleType("transformers")
+    fake.StoppingCriteria = object
+    fake.StoppingCriteriaList = list
+    monkeypatch.setitem(sys.modules, "transformers", fake)
     seen = {}
 
     def generate(*a, **kw):
