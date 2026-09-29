@@ -1,4 +1,4 @@
-"""Subtitle translation through the DeepSeek API (OpenAI compatible).
+"""Subtitle translation through the DeepSeek API (or another OpenAI-compatible service).
 
 Quality strategy
   1. analyse the whole transcript once → synopsis, speakers/register and a
@@ -6,16 +6,21 @@ Quality strategy
   2. translate in batches; every request carries the *entire* transcript as
      an identical prefix (cheap thanks to prefix caching) so each batch knows
      what came before and after
-  3. strict id-keyed JSON, validated; missing/empty ids are retried
+  3. batches end at sentence boundaries; strict id-keyed JSON, validated;
+     missing, empty or untranslated ids are retried
   4. target-language post-processing (script conversion, subtitle punctuation)
 
 Failure handling
   * errors that retrying cannot fix (bad key, no balance, unknown model…)
     stop the whole run at once with a readable message
+  * a batch the service rejects (e.g. its content filter) only fails that
+    batch; everything else is still returned
   * cancelling stops scheduling new requests and aborts the ones in flight
   * cues that still have no translation are reported in `Translator.failed`
+  * token usage is summed in `Translator.usage`
 """
 import concurrent.futures as cf
+import difflib
 import json
 import logging
 import re
@@ -23,6 +28,7 @@ import threading
 from typing import Callable, Dict, List, Optional
 
 from . import config
+from .asr import is_cjk
 
 log = logging.getLogger("lumen.translate")
 
@@ -52,6 +58,9 @@ TONES = {
 # every batch / the analysis request
 FULL_CONTEXT_TOKENS = 60_000
 ANALYSE_TOKENS = 60_000
+BATCH = 40              # cues per request (moved to the nearest sentence end)
+PARALLEL = 6            # requests in flight
+RETRY_WAIT = 2.0        # seconds before retrying after an error (grows per attempt, max 4×)
 
 
 def lang_name(code: str) -> str:
@@ -70,7 +79,7 @@ def _client(settings: dict, timeout: float = 180, max_retries: int = 1):
     from openai import OpenAI
     key = settings.get("api_key") or ""
     if not key:
-        raise TranslateError("尚未設定 DeepSeek API Key")
+        raise TranslateError("尚未設定翻譯服務的 API Key（設定 → 翻譯）")
     return OpenAI(api_key=key, base_url=settings.get("base_url") or "https://api.deepseek.com",
                   timeout=timeout, max_retries=max_retries)
 
@@ -90,7 +99,11 @@ def fatal_message(e: Exception) -> Optional[str]:
     if isinstance(e, openai.APIStatusError) and e.status_code == 402:
         return "API 帳戶餘額不足（402），請儲值後再試"
     if isinstance(e, openai.BadRequestError):
-        return f"翻譯請求被拒絕（400）：{str(e)[:200]}"
+        # a wrong model name is the same for every request; anything else (a
+        # content filter, one oversized batch) only concerns that request
+        m = str(e).lower()
+        if "model" in m and any(w in m for w in ("not exist", "does not exist", "not found", "unsupported", "invalid model")):
+            return f"模型名稱不正確或此服務不支援（400）：{str(e)[:200]}"
     return None
 
 
@@ -106,13 +119,17 @@ def _parse_json(txt: str) -> dict:
         raise
 
 
-def _chat(client, model: str, messages: list, thinking: bool = True, max_tokens: int = 48000, effort: str = None) -> str:
+def _chat(client, model: str, messages: list, thinking: bool = True, max_tokens: int = 48000, effort: str = None,
+          deepseek: bool = True, usage: Optional[Callable] = None) -> str:
     kw = dict(model=model, messages=messages, response_format={"type": "json_object"}, max_tokens=max_tokens)
-    if not thinking:
+    if not thinking and deepseek:
+        # DeepSeek-specific switch; other OpenAI-compatible services may reject unknown fields
         kw["extra_body"] = {"thinking": {"type": "disabled"}}
-    elif effort:
+    elif thinking and effort:
         kw["reasoning_effort"] = effort
     r = client.chat.completions.create(**kw)
+    if usage:
+        usage(getattr(r, "usage", None))
     ch = r.choices[0]
     if getattr(ch, "finish_reason", None) == "length":
         raise Truncated("output truncated at max_tokens")
@@ -188,18 +205,82 @@ def _brief_block(brief: Optional[dict]) -> str:
             + json.dumps(brief, ensure_ascii=False) + "\n\n")
 
 
+NEG_WORDS = {"not", "no", "never", "n't", "dont", "don't", "cannot", "can't", "won't", "isn't", "aren't", "wasn't",
+             "weren't", "didn't", "doesn't", "nothing", "nobody", "none", "nor", "ne", "pas", "nicht", "kein", "nunca", "nada"}
+NEG_CHARS = set("不沒没無无別别非未莫勿")
+NEG_SUFFIX = ("ない", "ません", "なかった", "안", "못", "않", "없")
+CJK_NUM = set("零〇一二三四五六七八九十百千萬万億亿兩两")
+
+
+def _negations(t: str) -> int:
+    low = t.lower()
+    n = sum(1 for w in re.findall(r"[a-z']+", low) if w in NEG_WORDS or w.endswith("n't"))
+    n += sum(1 for c in t if c in NEG_CHARS)
+    n += sum(low.count(x) for x in NEG_SUFFIX)
+    return n
+
+
+def _numbers(t: str):
+    return re.findall(r"\d+", t), [c for c in t if c in CJK_NUM]
+
+
 def _guard_fix(old: str, new: str) -> bool:
-    """Accept a proofreading fix only if it is a small, local correction."""
-    import difflib
+    """Accept a proofreading fix only if it looks like a speech-recognition
+    correction: at most two small replacements, no added or removed words,
+    no changed numbers and no new negation. Replaced Latin-script words must
+    be spelled alike (mis-heard words sound alike). Meaning-changing edits
+    ("love" → "hate", "8 點" → "9 點", adding "not") are refused."""
     new = (new or "").strip()
     if not new or new == old:
         return False
     ko = "".join(c for c in old if c.isalnum())
     kn = "".join(c for c in new if c.isalnum())
-    if not ko or not kn:
+    if not ko or not kn or _numbers(old) != _numbers(new) or _negations(new) > _negations(old):
         return False
-    sim = difflib.SequenceMatcher(None, ko, kn, autojunk=False).ratio()
-    return sim >= 0.6 and 0.75 <= len(kn) / len(ko) <= 1.3
+    if " " in old.strip() and not any(is_cjk(c) for c in old):
+        wo, wn = re.findall(r"[\w']+", old.lower()), re.findall(r"[\w']+", new.lower())
+        ops = [o for o in difflib.SequenceMatcher(None, wo, wn, autojunk=False).get_opcodes() if o[0] != "equal"]
+        if not ops or len(ops) > 2:
+            return False
+        for tag, i1, i2, j1, j2 in ops:
+            if tag != "replace" or i2 - i1 > 2 or j2 - j1 > 2:
+                return False
+            if difflib.SequenceMatcher(None, " ".join(wo[i1:i2]), " ".join(wn[j1:j2])).ratio() < 0.5:
+                return False
+        return True
+    ops = [o for o in difflib.SequenceMatcher(None, ko, kn, autojunk=False).get_opcodes() if o[0] != "equal"]
+    if not ops or len(ops) > 2 or any(max(i2 - i1, j2 - j1) > 4 for _, i1, i2, j1, j2 in ops):
+        return False
+    changed = sum(max(i2 - i1, j2 - j1) for _, i1, i2, j1, j2 in ops)
+    return changed <= max(4, len(ko) // 4) and abs(len(kn) - len(ko)) <= max(2, len(ko) // 5)
+
+
+def _norm_cmp(t: str) -> str:
+    return "".join(c for c in (t or "").lower() if c.isalnum())
+
+
+def _untranslated(src: str, tgt: str) -> bool:
+    """The model copied the source instead of translating it."""
+    a = _norm_cmp(src)
+    return len(a) >= 6 and a == _norm_cmp(tgt)
+
+
+def plan_batches(cues: List[dict], size: int = BATCH, slack: int = 8) -> List[List[int]]:
+    """Consecutive batches of about `size` cues, each ending where a sentence
+    ends, so no sentence is split between two independent requests."""
+    from .segmenter import ends_sentence
+    n = len(cues)
+    out, i = [], 0
+    while i < n:
+        j = min(n, i + size)
+        if j < n:
+            cands = [k for k in range(max(i + size // 2, j - slack), min(n, j + slack) + 1)
+                     if ends_sentence(cues[k - 1].get("src", ""))]
+            if cands:
+                j = min(cands, key=lambda k: (abs(k - j), -k))
+        out.append(list(range(i, j)))
+        i = j
+    return out
 
 
 def _transcript_block(cues: List[dict], budget: Optional[int] = None) -> str:
@@ -223,13 +304,29 @@ class Translator:
         self.client = _client(self.settings, timeout, max_retries)
         self.model = self.settings.get("model") or "deepseek-flash"
         self.glossary = parse_glossary(self.settings.get("glossary", ""))
+        self.deepseek = config.api_host(self.settings).endswith("deepseek.com")
         self.failed: List[int] = []
+        self.fixes: Dict[int, str] = {}          # cue index → source text before proofreading
+        self.usage = {"requests": 0, "prompt": 0, "completion": 0, "cache_hit": 0}
+        self._ulock = threading.Lock()
+
+    def _count(self, u):
+        with self._ulock:
+            self.usage["requests"] += 1
+            if u is not None:
+                self.usage["prompt"] += int(getattr(u, "prompt_tokens", 0) or 0)
+                self.usage["completion"] += int(getattr(u, "completion_tokens", 0) or 0)
+                self.usage["cache_hit"] += int(getattr(u, "prompt_cache_hit_tokens", 0) or 0)
+
+    def _chat(self, messages: list, **kw) -> str:
+        return _chat(self.client, self.model, messages, deepseek=self.deepseek, usage=self._count, **kw)
 
     def test(self) -> str:
-        r = self.client.chat.completions.create(
-            model=self.model, messages=[{"role": "user", "content": 'Reply {"ok":true}'}],
-            response_format={"type": "json_object"}, max_tokens=20,
-            extra_body={"thinking": {"type": "disabled"}})
+        kw = dict(model=self.model, messages=[{"role": "user", "content": 'Reply {"ok":true}'}],
+                  response_format={"type": "json_object"}, max_tokens=20)
+        if self.deepseek:
+            kw["extra_body"] = {"thinking": {"type": "disabled"}}
+        r = self.client.chat.completions.create(**kw)
         return r.choices[0].message.content
 
     # ---------------------------------------------------------------- brief
@@ -247,7 +344,7 @@ class Translator:
             '  "asr_fixes": list of {"heard": wrong text, "meant": likely intended text} for obvious recognition errors.\n\n'
             + _transcript_block(cues, ANALYSE_TOKENS)
         )
-        out = _chat(self.client, self.model, [{"role": "user", "content": prompt}], thinking=False, max_tokens=8000)
+        out = self._chat([{"role": "user", "content": prompt}], thinking=False, max_tokens=8000)
         try:
             d = _parse_json(out)
         except ValueError:
@@ -260,7 +357,7 @@ class Translator:
                       cancelled: Callable[[], bool] = lambda: False) -> List[str]:
         opts = opts or {}
         n = len(cues)
-        self.failed = []
+        self.failed, self.fixes = [], {}
         if n == 0:
             return []
         brief = None
@@ -279,8 +376,7 @@ class Translator:
         system = _system(src, tgt, tone, opts, None, self.glossary)
         full = _transcript_block(cues)
         use_full = est_tokens(full) <= FULL_CONTEXT_TOKENS
-        B = 40 if n > 60 else max(8, n)
-        batches = [list(range(i, min(n, i + B))) for i in range(0, n, B)]
+        batches = plan_batches(cues) if n > BATCH + 20 else [list(range(n))]
         result: Dict[int, str] = {}
         lock = threading.Lock()
         stop = threading.Event()
@@ -306,8 +402,11 @@ class Translator:
             msgs = [{"role": "system", "content": system},
                     {"role": "user", "content": _brief_block(brief) + ctx + "\n\n" + ask}]
             d = {}
+            errored = truncated = False
             try:
-                d = _parse_json(_chat(self.client, self.model, msgs, thinking=True))
+                d = _parse_json(self._chat(msgs, thinking=True))
+                if not isinstance(d, dict):
+                    last_err[:] = ["翻譯服務回傳的格式不正確"]
             except Exception as e:
                 msg = fatal_message(e)
                 if msg:
@@ -317,6 +416,7 @@ class Translator:
                     return
                 if stop.is_set() or cancelled():
                     return
+                errored, truncated = True, isinstance(e, Truncated)
                 last_err[:] = [str(e)[:200]]
                 log.warning("batch %s-%s failed (%s)", idx[0] + 1, idx[-1] + 1, e)
             d = d if isinstance(d, dict) else {}
@@ -324,19 +424,23 @@ class Translator:
             fx = _id_map(d.get("fix")) if opts.get("proofread") else {}
             with lock:
                 for i in idx:
-                    if got.get(i, "").strip():
-                        result[i] = got[i]
+                    t = got.get(i, "")
+                    # a copy of the source is retried; on the last attempt it is kept (names, codes…)
+                    if t.strip() and (attempt >= 2 or not _untranslated(cues[i]["src"], t)):
+                        result[i] = t
                     if i in fx and _guard_fix(cues[i]["src"], fx[i]):
                         fixes[i] = fx[i].strip()
                 report()
             missing = [i for i in idx if not result.get(i, "").strip() and _has_text(cues[i]["src"])]
             if missing and attempt < 2:
-                # retry smaller groups
-                step = max(1, len(missing) // 2) if attempt == 1 else len(missing)
+                if errored and not truncated and RETRY_WAIT and stop.wait(min(4 * RETRY_WAIT, RETRY_WAIT * (attempt + 1))):
+                    return          # back off (rate limit, flaky network) unless the run is being stopped
+                # retry smaller groups; a truncated reply means the batch was too big
+                step = max(1, len(missing) // 2) if (attempt == 1 or truncated) else len(missing)
                 for j in range(0, len(missing), step):
                     run(missing[j: j + step], attempt + 1)
 
-        ex = cf.ThreadPoolExecutor(max_workers=6)
+        ex = cf.ThreadPoolExecutor(max_workers=PARALLEL)
         futs = [ex.submit(run, b) for b in batches]
         try:
             while True:
@@ -362,6 +466,7 @@ class Translator:
         if fixes:
             log.info("proofreading corrected %d cue(s)", len(fixes))
             for i, t in fixes.items():
+                self.fixes[i] = cues[i]["src"]
                 cues[i]["src"] = t
         out = [postprocess(result.get(i, ""), tgt) for i in range(n)]
         self.failed = [i for i in range(n) if not out[i] and _has_text(cues[i]["src"])]
@@ -387,9 +492,8 @@ class Translator:
         last_err = None
         for attempt in range(2):
             try:
-                d = _parse_json(_chat(self.client, self.model,
-                                      [{"role": "system", "content": system}, {"role": "user", "content": ask}],
-                                      thinking=attempt == 0, max_tokens=16000))
+                d = _parse_json(self._chat([{"role": "system", "content": system}, {"role": "user", "content": ask}],
+                                           thinking=attempt == 0, max_tokens=16000))
                 t = d.get("t", d) if isinstance(d, dict) else {}
                 v = ""
                 if isinstance(t, dict):
@@ -443,16 +547,19 @@ def postprocess(t: str, tgt: str) -> str:
     t = re.sub(r"[ \t]+", " ", t)
     if tgt == "zh-TW" or tgt == "yue":
         cc_s2t = _opencc("s2t")
-        if cc_s2t and cc_s2t.convert(t) != t:        # contains simplified characters
+        # "台" is also a Traditional character (s2t turns it into "臺"), so it
+        # alone does not mean the text is Simplified
+        if cc_s2t and cc_s2t.convert(t).replace("臺", "台") != t.replace("臺", "台"):
             cc = _opencc("s2twp") if tgt == "zh-TW" else _opencc("s2hk")
             if cc:
-                t = cc.convert(t)
+                conv = cc.convert(t)
+                t = conv.replace("臺", "台") if "臺" not in t else conv
     elif tgt == "zh-CN":
         cc_t2s = _opencc("t2s")
         if cc_t2s and cc_t2s.convert(t) != t:        # contains traditional characters
             cc = _opencc("tw2sp") or cc_t2s
             t = cc.convert(t)
     if tgt in CJK_TARGETS:
-        t = re.sub(r"[。．，、,]+$", "", t)
         t = t.replace("...", "…")
+        t = re.sub(r"(?<!\.)[。．，、,.]+$", "", t)
     return t

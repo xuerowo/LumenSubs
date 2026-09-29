@@ -15,8 +15,10 @@ from typing import List
 
 from .asr import is_cjk, is_kept_char
 
-STRONG = set("。！？!?…‼⁉")
-WEAK = set("、，,;；:：—–")
+# sentence-final marks, incl. Arabic/Persian "؟", Urdu "۔", Devanagari danda "। ॥"
+# and the Greek question mark (U+037E, when it has not been normalised to ";")
+STRONG = set("。！？!?…‼⁉؟۔।॥;")
+WEAK = set("、，,;；:：—–،؛")
 PERIODS = set(".．")
 # a "." after these does not end a sentence
 ABBREV = {"mr", "mrs", "ms", "dr", "prof", "sr", "sra", "jr", "st", "mt", "vs", "etc", "e.g", "i.e", "cf", "no",
@@ -34,14 +36,30 @@ JA_PARTICLE_HEAD = {"は", "が", "を", "に", "へ", "と", "で", "の", "も
 MAX_DUR = 7.0
 VOCAL_CHARS = set("あぁおぉうぅんはふへひほえぇいぃアァオォウゥンハフヘヒホエイーっッ啊哦嗯呃哎唔嘿哈呵喔噢嗚呜哇呀아어오우음흠하")
 VOCAL_WORDS = {"oh", "ah", "ahh", "uh", "um", "umm", "mm", "mmm", "hm", "hmm", "huh", "ha", "haha", "ooh", "aah", "eh", "whoa", "wow"}
+# short answers written with "vocal" characters that still carry meaning
+MEANINGFUL = {"はい", "いいえ", "いえ", "ええ", "うん", "ううん", "いや", "おい", "ほら", "네", "예", "응", "아니", "嗯", "是", "對", "对",
+              "好", "yes", "no", "yeah", "yep", "nope", "ok", "okay"}
+
+
+def _norm_tok(t: str) -> str:
+    return re.sub(r"[\W_ーっッ〜~]+", "", t.lower())
 
 
 def is_vocal(text: str) -> bool:
-    """Pure interjection / vocalisation (moans, 'uh', 'うん'…)."""
+    """Only interjection / vocalisation characters (moans, 'uh', 'うん'…).
+    Anything with a digit is not ("3, 2, 1", "2020.")."""
+    if any(c.isdigit() for c in text) or not any(is_kept_char(c) for c in text):
+        return False
     words = re.findall(r"[A-Za-z]+", text)
     if words and not all(w.lower() in VOCAL_WORDS for w in words):
         return False
     return all(c in VOCAL_CHARS for c in text if is_kept_char(c) and not c.isascii())
+
+
+def is_meaningful(text: str) -> bool:
+    """A vocal-looking cue that is actually an answer ('はい', 'いいえ', '네'…)."""
+    toks = [_norm_tok(x) for x in re.split(r"[\s、。，,.!！?？…・]+", text)]
+    return any(t in MEANINGFUL for t in toks if t)
 
 
 def width(text: str) -> float:
@@ -119,23 +137,50 @@ def segment(words: List[dict], max_chars: int = 42, duration: float = None) -> L
         if not any(is_kept_char(c) for c in text):
             continue
         out.append({"start": ws[0]["s"], "end": ws[-1]["e"], "src": text})
-    out = _tidy_vocal(out)
+    out = _tidy_vocal(out, limit)
     polish_timing(out, duration)
     return out
 
 
-def _tidy_vocal(cues: List[dict]) -> List[dict]:
+def _glue(a: str, b: str) -> str:
+    return _clean(a + ("" if any(is_cjk(ch) for ch in a + b) else " ") + b)
+
+
+def _tidy_vocal(cues: List[dict], limit: int = 42) -> List[dict]:
+    """Merge runs of vocalisations; a very short one joins a close neighbour
+    rather than standing alone. Only an isolated one- or two-character breath
+    ('あっ') is dropped — short answers such as 'はい' / 'いいえ' always stay."""
     merged = []
     for c in cues:
         p = merged[-1] if merged else None
         if p and is_vocal(p["src"]) and is_vocal(c["src"]) and c["start"] - p["end"] < 0.35 and c["end"] - p["start"] <= MAX_DUR:
             p["end"] = c["end"]
             if c["src"].rstrip("。、.,!！?？") != p["src"].rstrip("。、.,!！?？"):
-                glue = "" if any(is_cjk(ch) for ch in p["src"] + c["src"]) else " "
-                p["src"] = _compress_vocal(_clean(p["src"] + glue + c["src"]))
+                p["src"] = _compress_vocal(_glue(p["src"], c["src"]))
             continue
         merged.append(dict(c))
-    return [c for c in merged if not (is_vocal(c["src"]) and c["end"] - c["start"] < 0.5)]
+    out: List[dict] = []
+    for i, c in enumerate(merged):
+        if not (is_vocal(c["src"]) and c["end"] - c["start"] < 0.5) or is_meaningful(c["src"]):
+            out.append(c)
+            continue
+        prev = out[-1] if out else None
+        nxt = merged[i + 1] if i + 1 < len(merged) else None
+        gp = c["start"] - prev["end"] if prev else 1e9
+        gn = nxt["start"] - c["end"] if nxt else 1e9
+        fits_p = prev is not None and gp < 0.35 and width(prev["src"] + c["src"]) <= limit and c["end"] - prev["start"] <= MAX_DUR
+        fits_n = nxt is not None and gn < 0.35 and width(c["src"] + nxt["src"]) <= limit and nxt["end"] - c["start"] <= MAX_DUR
+        if fits_p and (gp <= gn or not fits_n):
+            prev["src"], prev["end"] = _glue(prev["src"], c["src"]), c["end"]
+        elif fits_n:
+            nxt["src"], nxt["start"] = _glue(c["src"], nxt["src"]), c["start"]
+        elif len(_kept(c["src"])) > 2:
+            out.append(c)
+    return out
+
+
+def _kept(t: str) -> str:
+    return "".join(ch for ch in t if is_kept_char(ch))
 
 
 def _compress_vocal(text: str, keep: int = 4) -> str:

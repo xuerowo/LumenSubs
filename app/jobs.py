@@ -22,11 +22,18 @@ class Job:
         self.progress = 0.0
         self.result = None
         self.error = ""
+        self.note = ""               # what the job is waiting for, shown next to the progress
         self.created = time.time()
         self._cancel = threading.Event()
 
     def set(self, p: float):
         self.progress = max(self.progress, min(1.0, float(p)))
+        self.note = ""
+        if self._cancel.is_set():
+            raise Cancelled()
+
+    def wait_note(self, note: str):
+        self.note = note
         if self._cancel.is_set():
             raise Cancelled()
 
@@ -38,7 +45,7 @@ class Job:
 
     def to_dict(self) -> dict:
         return {"id": self.id, "kind": self.kind, "status": self.status, "progress": round(self.progress, 4),
-                "result": self.result if self.status == "done" else None, "error": self.error}
+                "result": self.result if self.status == "done" else None, "error": self.error, "note": self.note}
 
 
 JOBS: Dict[str, Job] = {}
@@ -50,8 +57,24 @@ def get(jid: str) -> Optional[Job]:
         return JOBS.get(jid)
 
 
+def running(project: str = "", kind: str = ""):
+    with _lock:
+        return [j for j in JOBS.values() if j.status == "running" and (not project or j.project == project)
+                and (not kind or j.kind == kind)]
+
+
+def cancel_all(project: str = ""):
+    for j in running(project):
+        j.cancel()
+
+
 def start(kind: str, fn: Callable[[Job], object], project: str = "") -> Job:
-    job = Job(kind, project)
+    return run(Job(kind, project), fn)
+
+
+def run(job: Job, fn: Callable[[Job], object]) -> Job:
+    """Register `job` and run fn(job) in a background thread."""
+    kind = job.kind
     now = time.time()
     with _lock:
         # prune finished jobs older than an hour

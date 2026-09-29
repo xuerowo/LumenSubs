@@ -3,7 +3,7 @@ import re
 
 import pytest
 
-from app.segmenter import ends_sentence, polish_timing, segment
+from app.segmenter import ends_sentence, is_meaningful, is_vocal, polish_timing, segment
 
 
 def words(text, step=0.32, dur=0.3):
@@ -79,3 +79,35 @@ def test_segment_output_never_overlaps():
     cues = segment(ws, 42, t + 1)
     assert cues
     _check_invariants(cues)
+
+
+# ---------------------------------------------------------------- short answers and punctuation
+def _w(*items):
+    return [{"text": t, "s": s, "e": e} for t, s, e in items]
+
+
+def test_short_answers_are_never_dropped():
+    out = segment(_w(("本当に行くの？", 0.0, 1.5), ("はい。", 2.5, 2.85), ("じゃあ行こう。", 4.0, 5.2)))
+    assert [c["src"] for c in out] == ["本当に行くの？", "はい。", "じゃあ行こう。"]
+
+
+def test_numbers_are_not_vocalisations():
+    assert not is_vocal("3, 2, 1") and not is_vocal("2020.")
+    out = segment(_w(("Ready? ", 0.0, 0.6), ("3. ", 1.5, 1.8), ("2. ", 2.5, 2.8), ("1. ", 3.5, 3.8), ("Go!", 4.5, 4.9)))
+    assert [c["src"] for c in out] == ["Ready?", "3.", "2.", "1.", "Go!"]
+
+
+def test_isolated_short_breath_is_dropped_but_close_one_is_merged():
+    assert [c["src"] for c in segment(_w(("あっ", 0.0, 0.2), ("今日は。", 3.0, 4.0)))] == ["今日は。"]
+    out = segment(_w(("あっ", 0.0, 0.2), ("やめて。", 0.3, 1.2)))
+    assert [c["src"] for c in out] == ["あっやめて。"]
+
+
+def test_meaningful_detection():
+    assert is_meaningful("はい。") and is_meaningful("いいえ") and is_meaningful("네")
+    assert not is_meaningful("あっ") and not is_meaningful("はぁ…")
+
+
+@pytest.mark.parametrize("text", ["كيف حالك؟", "यह अच्छा है।", "چطوری؟", "Τι κάνεις;"])
+def test_non_latin_sentence_ends(text):
+    assert ends_sentence(text)

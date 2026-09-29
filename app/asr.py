@@ -55,9 +55,9 @@ def is_cjk(ch: str) -> bool:
 
 class RepeatStop:
     """Stop a sequence once its tail is a short pattern repeated many times
-    (the decoder fell into a loop, e.g. on long moans or music). The
-    repetition fixer collapses the loop afterwards; the local-window pass
-    recovers any speech that followed."""
+    (the decoder fell into a loop, e.g. on long moans or music).
+    collapse_repeats() shortens what is left of the loop afterwards; the
+    local-window pass recovers any speech that followed."""
 
     def __init__(self, max_period: int = 8, min_reps: int = 16):
         self.max_period, self.min_reps = max_period, min_reps
@@ -78,7 +78,28 @@ class RepeatStop:
         return out
 
 
-def _install_loop_guard(qwen_model):
+_REPEAT = re.compile(r"(.{1,12}?)\1{3,}", re.S)
+
+
+def collapse_repeats(text: str, keep: int = 2) -> str:
+    """'やめて、やめて、…' ×16 → 'やめて、やめて…'. A unit repeated four or more
+    times is kept `keep` times followed by an ellipsis. Units without letters
+    (digits, punctuation, spaces) are left alone: "10000" or "!!!!" are fine."""
+    def sub(m):
+        unit = m.group(1)
+        if not any(c.isalpha() for c in unit):
+            return m.group(0)
+        return (unit * keep).rstrip("、，,。. ") + "…"
+    prev = None
+    while prev != text:
+        prev, text = text, _REPEAT.sub(sub, text)
+    return text
+
+
+def _install_loop_guard(qwen_model) -> bool:
+    """Make every generate() call of the ASR model stop runaway repetitions.
+    qwen-asr has no public hook for this, so its inner model's generate is
+    wrapped; returns False (and logs) if the library changed shape."""
     from transformers import StoppingCriteria, StoppingCriteriaList
 
     class _SC(StoppingCriteria):
@@ -88,14 +109,19 @@ def _install_loop_guard(qwen_model):
         def __call__(self, input_ids, scores, **kw):
             return self.rs(input_ids, scores)
 
-    inner = qwen_model.model
-    orig = inner.generate
+    inner = getattr(qwen_model, "model", None)
+    orig = getattr(inner, "generate", None)
+    if not callable(orig):
+        log.warning("qwen-asr internals changed (no model.generate): the repetition guard is NOT active — "
+                    "long music or breathing may make transcription slow")
+        return False
 
     def generate(*a, **kw):
         # add ours even if the caller already passes stopping criteria
         kw["stopping_criteria"] = StoppingCriteriaList([*(kw.get("stopping_criteria") or []), _SC()])
         return orig(*a, **kw)
     inner.generate = generate
+    return True
 
 
 _SCRIPT = {
@@ -113,6 +139,33 @@ _SCRIPT = {
 def looks_like(text: str, lang: str) -> bool:
     rx = _SCRIPT.get(lang)
     return bool(rx and rx.search(text or ""))
+
+
+def clearly_other_script(text: str, lang: str) -> bool:
+    """Text written almost entirely in Latin letters while `lang` uses another
+    script (e.g. an English passage inside a Japanese video)."""
+    if lang not in _SCRIPT and lang not in CJK_LANGS:
+        return False
+    letters = [c for c in text if c.isalpha()]
+    if len(letters) < 8:
+        return False
+    return sum(1 for c in letters if c.isascii()) / len(letters) >= 0.85
+
+
+def friendly_load_error(e: Exception, device: str) -> str:
+    msg = str(e)
+    low = msg.lower()
+    if "out of memory" in low:
+        return ("顯示卡記憶體不足，無法載入語音模型（約需 6.5 GB 可用的顯示卡記憶體）。"
+                "請關閉其他使用顯示卡的程式（遊戲、其他 AI 工具）後重試，或到「設定」改用 CPU（需約 16 GB 記憶體，速度較慢）。")
+    if isinstance(e, MemoryError) or "not enough memory" in low or "cannot allocate memory" in low:
+        return "電腦記憶體不足，無法載入語音模型（CPU 模式約需 13 GB 可用記憶體）。請關閉其他程式後重試。"
+    if "no kernel image" in low or "not compatible with the current pytorch" in low:
+        return ("這張顯示卡太舊，目前安裝的 PyTorch 已不支援。請執行 start.bat --reinstall 重新挑選版本，"
+                "或到「設定」改用 CPU。")
+    if "offline" in low or "local_files_only" in low or "couldn't find" in low or "does not appear to have" in low:
+        return "語音模型檔案不完整或尚未下載，請關閉程式後重新執行 start.bat（會自動補齊下載）。"
+    return f"語音模型載入失敗（{device.upper()}）：{msg[:300]}"
 
 
 class ASREngine:
@@ -139,7 +192,8 @@ class ASREngine:
             try:
                 self._unload()
                 from qwen_asr import Qwen3ASRModel
-                dtype = torch.bfloat16 if want == "cuda" else torch.float32
+                # bfloat16 needs a GPU from 2020 on (Ampere); older cards get float16
+                dtype = (torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16) if want == "cuda" else torch.float32
                 dm = "cuda:0" if want == "cuda" else "cpu"
                 t = time.time()
                 self.model = Qwen3ASRModel.from_pretrained(
@@ -163,8 +217,20 @@ class ASREngine:
                 log.info("ASR models loaded on %s in %.1fs", want, time.time() - t)
             except Exception as e:  # pragma: no cover
                 log.exception("model load failed")
-                self.status, self.error = "error", str(e)
-                raise
+                self.model = None
+                self.status, self.error = "error", friendly_load_error(e, want)
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                raise RuntimeError(self.error) from e
+
+    def unload(self):
+        """Free the GPU/RAM held by the models (they load again on the next job)."""
+        with self._lock, self._run_lock:
+            self._unload()
+            self.status, self.error = "idle", ""
 
     def _unload(self):
         if self.model is not None:
@@ -182,14 +248,30 @@ class ASREngine:
 
     # ------------------------------------------------------------ main entry
     def transcribe(self, wav: np.ndarray, language: Optional[str] = None, context: str = "",
-                   progress: Callable[[float], None] = lambda p: None) -> dict:
+                   progress: Callable[[float], None] = lambda p: None,
+                   cancelled: Callable[[], bool] = lambda: False,
+                   note: Callable[[str], None] = lambda s: None) -> dict:
         """wav: mono float32 16 kHz. language: UI code or None/auto.
-        Returns {language, language_name, words:[{text,s,e,lang}], vad, duration}."""
+        Returns {language, language_name, words:[{text,s,e,lang}], vad, duration, aligned}."""
+        from .jobs import Cancelled
         if len(wav) < SR // 10:
             raise ValueError("音訊太短或沒有聲音內容（少於 0.1 秒）")
-        self.ensure_loaded()
-        with self._run_lock:
-            return self._transcribe(wav, language, context, progress)
+        for _ in range(2):
+            if self.model is None:
+                note("載入語音模型中…")
+                self.ensure_loaded()
+            # only one job uses the GPU at a time; wait for it, but stay cancellable
+            while not self._run_lock.acquire(timeout=0.5):
+                if cancelled():
+                    raise Cancelled()
+                note("等待前一個工作完成…")
+            try:
+                if self.model is not None:      # a device switch may have unloaded it meanwhile
+                    note("")
+                    return self._transcribe(wav, language, context, progress)
+            finally:
+                self._run_lock.release()
+        raise RuntimeError(self.error or "語音模型尚未載入，請稍候再試")
 
     def _decode(self, sub: List[np.ndarray], sub_l, context: str):
         """model.transcribe with an out-of-memory fallback: halve the batch."""
@@ -213,7 +295,7 @@ class ASREngine:
             res = self._decode(sub, sub_l, context)
             for k, r in enumerate(res):
                 forced = sub_l[k] if isinstance(sub_l, list) else sub_l
-                texts.append((r.text or "").strip())
+                texts.append(collapse_repeats((r.text or "").strip()))
                 names.append(forced or (r.language.split(",")[0] if r.language else ""))
             if prog:
                 prog(min(len(segs), bi + bs) / max(1, len(segs)))
@@ -255,7 +337,8 @@ class ASREngine:
             share = langs[main_lang] / max(1, sum(langs.values()))
             redo = [i for i, (t, ln) in enumerate(zip(L_text, L_lang))
                     if t and ln and ln != main_lang and share >= 0.8
-                    and (sum(1 for c in t if is_kept_char(c)) < 80 or looks_like(t, main_lang))]
+                    and (looks_like(t, main_lang)
+                         or (sum(1 for c in t if is_kept_char(c)) < 80 and not clearly_other_script(t, main_lang)))]
             if redo:
                 t2, _ = self._asr([ch_segs[i] for i in redo], main_lang, context, 4)
                 for i, t in zip(redo, t2):
@@ -301,15 +384,12 @@ class ASREngine:
         words_all: List[dict] = []
         todo = [i for i in live if choice.get(i)]
         AB = 8
+        n_aligned = 0
         for bi in range(0, len(todo), AB):
             batch = todo[bi: bi + AB]
             al = [i for i in batch if (win_lang.get(i) or "").lower() in self.aligner_langs]
-            res = {}
-            if al:
-                ar = self.model.forced_aligner.align(
-                    audio=[(wav[int(wins[i][0] * SR): int(wins[i][1] * SR)], SR) for i in al],
-                    text=[choice[i] for i in al], language=[win_lang[i] for i in al])
-                res = dict(zip(al, ar))
+            res = self._align(wav, wins, choice, win_lang, al) if al else {}
+            n_aligned += len(res)
             for i in batch:
                 a, b = wins[i]
                 ws = []
@@ -335,7 +415,33 @@ class ASREngine:
             "words": words_all,
             "vad": regions,
             "duration": total,
+            # share of windows with word-level alignment (the rest is estimated from speech regions)
+            "aligned": round(n_aligned / len(todo), 3) if todo else 1.0,
         }
+
+    def _align(self, wav, wins, choice, win_lang, idx: List[int]) -> dict:
+        """Forced alignment of windows `idx` → {window: result}. Out of memory
+        halves the batch; windows that still fail are left out, so they fall
+        back to estimated timing instead of failing the whole transcription."""
+        try:
+            ar = self.model.forced_aligner.align(
+                audio=[(wav[int(wins[i][0] * SR): int(wins[i][1] * SR)], SR) for i in idx],
+                text=[choice[i] for i in idx], language=[win_lang[i] for i in idx])
+            return dict(zip(idx, ar))
+        except Exception as e:
+            if "out of memory" in str(e).lower():
+                try:
+                    import torch
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+            if len(idx) > 1:
+                h = len(idx) // 2
+                log.warning("alignment of %d windows failed (%s), retrying in halves", len(idx), str(e)[:120])
+                return {**self._align(wav, wins, choice, win_lang, idx[:h]),
+                        **self._align(wav, wins, choice, win_lang, idx[h:])}
+            log.warning("alignment failed for one window, using estimated timing: %s", str(e)[:200])
+            return {}
 
 
 # ---------------------------------------------------------------- helpers
@@ -415,14 +521,40 @@ def pick_text(lp: str, sp: str, win, regions) -> str:
         return lp if plausible(lk) else ""
     if not lk:
         return sp
-    sim = difflib.SequenceMatcher(None, lk, sk, autojunk=False).ratio()
-    if sim >= 0.5:
-        return lp
+    sm = difflib.SequenceMatcher(None, lk, sk, autojunk=False)
+    if sm.ratio() >= 0.5:
+        # the long pass sometimes adds a line the window never heard (a
+        # hallucinated "thanks for watching" over music, lyrics in a non-speech
+        # stretch): keep only the part both passes agree on
+        if len(lk) > 1.4 * len(sk) + 4:
+            lp = _trim_to_match(lp, sm)
+            if not _kept(lp) or len(_kept(lp)) > 1.4 * len(sk) + 4:
+                return sp
+        return lp if plausible(_kept(lp)) else sp
     if len(lk) < 0.6 * len(sk):
         return sp
     if len(sk) < 0.6 * len(lk):
         return lp if plausible(lk) else sp
     return lp
+
+
+def _trim_to_match(lp: str, sm: "difflib.SequenceMatcher") -> str:
+    """Cut the long-pass slice `lp` down to the span (of kept characters) that
+    matches the local transcript, keeping the punctuation that closes it."""
+    blocks = [b for b in sm.get_matching_blocks() if b.size]
+    if not blocks:
+        return lp
+    pos = [i for i, c in enumerate(lp) if is_kept_char(c)]
+    a0, a1 = blocks[0].a, blocks[-1].a + blocks[-1].size
+    if a0 <= 3:
+        a0 = 0
+    if len(pos) - a1 <= 3:
+        a1 = len(pos)
+    start = 0 if a0 == 0 else pos[a0]
+    end = len(lp) if a1 >= len(pos) else pos[a1 - 1] + 1
+    while end < len(lp) and not is_kept_char(lp[end]) and not lp[end].isspace():
+        end += 1
+    return lp[start:end].strip()
 
 
 def map_tokens(text: str, toks: list) -> List[dict]:

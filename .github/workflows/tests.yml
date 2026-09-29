@@ -2,23 +2,56 @@ name: tests
 
 on:
   push:
+    branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 3 * * 1"          # weekly: catch upstream releases that break installation
+  workflow_dispatch:
 
 jobs:
   pytest:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node --check web/app.js && node --check web/render.js && node --check web/subparse.js
-      - run: node --test tests/js/subparse.test.js
+      - run: node --check web/app.js && node --check web/render.js && node --check web/subparse.js && node --check web/subexport.js
+      - run: node --test tests/js/subparse.test.js tests/js/subexport.test.js tests/js/render.test.js
+
+  # the full dependency set (as start.bat installs it) must still resolve on
+  # every supported Python — this is what breaks for users, not the unit tests
+  resolve:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: resolve requirements (CPU PyTorch, known-good constraints first)
+        shell: bash
+        run: |
+          pip install --upgrade pip
+          grep -v '^torch' requirements.txt > core.txt
+          pip install --dry-run --ignore-installed -c requirements.lock -r core.txt \
+            || pip install --dry-run --ignore-installed -r core.txt
+          pip install --dry-run --ignore-installed "torch>=2.6,<2.15" --index-url https://download.pytorch.org/whl/cpu

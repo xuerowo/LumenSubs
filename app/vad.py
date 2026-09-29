@@ -1,8 +1,6 @@
 """Silero VAD (ONNX) — frame-level speech probability, used to cut audio at
 natural pauses and to sanity-check forced-alignment timestamps."""
-import glob
 import logging
-import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -16,19 +14,13 @@ _CTX = 64
 
 
 def _find_model() -> Optional[str]:
-    env = os.environ.get("LUMEN_VAD_ONNX")
-    if env and os.path.exists(env):
-        return env
-    pats = [
-        os.path.expanduser("~/.cache/huggingface/hub/models--onnx-community--silero-vad/snapshots/*/onnx/model.onnx"),
-    ]
-    for p in pats:
-        hits = glob.glob(p)
-        if hits:
-            return hits[0]
+    from . import config
+    p = config.vad_model_path()          # honours LUMEN_VAD_ONNX, HF_HOME and HF_HUB_CACHE
+    if p:
+        return str(p)
     try:
         from huggingface_hub import hf_hub_download
-        return hf_hub_download("onnx-community/silero-vad", "onnx/model.onnx")
+        return hf_hub_download(config.VAD_MODEL, "onnx/model.onnx")
     except Exception as e:
         log.warning("Silero VAD model unavailable (%s) — falling back to an energy-based VAD, "
                     "cue timing will be less precise", e)

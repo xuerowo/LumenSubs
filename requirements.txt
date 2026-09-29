@@ -1,22 +1,25 @@
-# Versions are bounded to the major releases LumenSubs is tested with, so a
-# reinstall cannot silently pull in breaking changes.
+# Direct dependencies with the major-version ranges LumenSubs is tested with.
+# qwen-asr pins some of its own dependencies exactly (e.g. transformers), and
+# indirect dependencies are not listed here: bootstrap.py installs with the
+# known-good versions in requirements.lock as constraints, so a reinstall does
+# not silently pick up untested releases.
 
 # Core
-fastapi>=0.115,<1
+fastapi>=0.115.3,<1          # >=0.115.3: Starlette with the multipart DoS fix
 uvicorn>=0.29,<1
-python-multipart>=0.0.9,<0.1
+python-multipart>=0.0.18,<0.1  # >=0.0.18: CVE-2024-53981 fixed
 openai>=1.40,<4
 numpy>=1.26,<3
 pillow>=10,<13
 onnxruntime>=1.17,<2   # Silero VAD
-opencc                 # zh-TW / zh-CN script safety net (optional)
+opencc>=1.1,<2         # zh-TW / zh-CN script safety net (optional)
 
 # Speech recognition (Qwen3-ASR-1.7B + Qwen3-ForcedAligner-0.6B)
 qwen-asr==0.0.6        # app/asr.py patches its generate(); re-test before upgrading
-torch                  # start.bat installs the CUDA build matching your GPU automatically
+torch>=2.6,<2.15       # start.bat installs the CUDA build matching your GPU automatically
 transformers>=4.57,<5
 accelerate>=1.0,<2
 soundfile>=0.12,<1
 librosa>=0.10,<1
 
-# External tool: FFmpeg (and ffprobe) must be on PATH — start.bat can install it.
+# External tool: FFmpeg (and ffprobe) must be on PATH or in ffmpeg/bin — start.bat can install it.

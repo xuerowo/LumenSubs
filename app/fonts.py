@@ -55,16 +55,18 @@ UA_WEB = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, 
           "Chrome/126.0 Safari/537.36")              # modern UA → sliced woff2 with unicode-range
 
 _lock = threading.Lock()
+_build_lock = threading.Lock()          # one index download at a time, without blocking readers
 _file_locks: Dict[str, threading.Lock] = {}
 _index: Optional[dict] = None
 _failed_at = 0.0
+RETRY_AFTER = 300                       # seconds between index attempts while offline
 
 
 def file_name(family: str, weight: int) -> str:
     return f"{family.replace(' ', '')}-{int(weight)}.ttf"
 
 
-def _get(url: str, ua: str, timeout: float = 30) -> bytes:
+def _get(url: str, ua: str, timeout: float = 15) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": ua})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
@@ -142,6 +144,9 @@ def build_index() -> dict:
 
 
 def index(build: bool = True) -> Optional[dict]:
+    """The font index; built from the fonts API on first use. The network
+    request runs outside the shared lock, so an offline or slow connection
+    never stalls other requests — they simply see no index yet."""
     global _index, _failed_at
     with _lock:
         if _index is None:
@@ -149,13 +154,21 @@ def index(build: bool = True) -> Optional[dict]:
                 _index = json.loads(INDEX.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 _index = None
-        if _index is None and build and time.time() - _failed_at > 60:
-            try:
-                _index = build_index()
-            except Exception as e:
-                _failed_at = time.time()
-                log.warning("font index unavailable (offline?): %s", e)
-        return _index
+        if _index is not None or not build or time.time() - _failed_at < RETRY_AFTER:
+            return _index
+    if not _build_lock.acquire(blocking=False):
+        return None                     # another request is building it right now
+    try:
+        d = build_index()
+        with _lock:
+            _index = d
+    except Exception as e:
+        with _lock:
+            _failed_at = time.time()
+        log.warning("font index unavailable (offline?): %s", e)
+    finally:
+        _build_lock.release()
+    return _index
 
 
 def css() -> str:
