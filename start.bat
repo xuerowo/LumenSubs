@@ -33,8 +33,15 @@ goto :eof
 :nopython
 echo.
 echo 找不到可用的 Python（需要 3.10 ~ 3.13，建議 3.12）。
-echo 請從 https://www.python.org/downloads/ 下載安裝，
+echo 注意：python.org 首頁最上方的最新版（3.14 以上）目前還不能用。
+echo.
+where winget >nul 2>nul && (
+  echo 可以在「命令提示字元」輸入下列指令自動安裝 Python 3.12：
+  echo     winget install -e --id Python.Python.3.12
+  echo.
+)
+echo 或從下方開啟的網頁，下載「Windows installer ^(64-bit^)」安裝，
 echo 安裝時請勾選「Add python.exe to PATH」，完成後再執行一次 start.bat。
 echo.
-start "" "https://www.python.org/downloads/"
+start "" "https://www.python.org/downloads/release/python-31210/"
 pause
