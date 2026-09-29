@@ -5,7 +5,7 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
-const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // yield to the event loop without timer throttling (background tabs clamp setTimeout to 1s)
 const yieldUI = () => new Promise(r => { const c = new MessageChannel(); c.port1.onmessage = () => r(); c.port2.postMessage(0); });
@@ -47,27 +47,33 @@ function tokenLost() {
   el.textContent = '與 LumenSubs 的連線已失效（程式可能已重新啟動）。請關閉此視窗並重新執行 start.bat；未儲存的編輯已備份在本機，重新開啟專案時會自動還原。';
   document.body.appendChild(el);
 }
+const OFFLINE_MSG = '無法連線到 LumenSubs：主控台視窗可能已關閉。請重新執行 start.bat（未儲存的編輯已備份在本機）。';
+const httpMsg = st => st >= 500 ? `LumenSubs 發生錯誤（HTTP ${st}），詳細記錄在 workspace/logs/lumen.log` : `請求失敗（HTTP ${st}）`;
 async function api(method, url, body) {
   const headers = { 'X-Lumen-Token': TOKEN }; if (body) headers['Content-Type'] = 'application/json';
-  const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  let r;
+  try { r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined }); }
+  catch (e) { throw Object.assign(new Error(OFFLINE_MSG), { status: 0, network: true }); }
   let d = null; try { d = await r.json(); } catch (e) { }
   if (r.status === 401 && d && d.code === 'token') tokenLost();
-  if (!r.ok) throw Object.assign(new Error((d && (d.detail || d.error)) || `HTTP ${r.status}`), { status: r.status });
+  if (!r.ok) throw Object.assign(new Error((d && (d.detail || d.error)) || httpMsg(r.status)), { status: r.status, code: d && d.code, data: d });
   return d;
 }
+// <video>/<img> cannot send headers: media URLs carry the access key as ?t=
+const authUrl = u => u ? u + (u.includes('?') ? '&' : '?') + 't=' + encodeURIComponent(TOKEN) : u;
 function uploadXHR(url, form, onProgress) {
   return new Promise((res, rej) => {
     const x = new XMLHttpRequest(); x.open('POST', url); x.setRequestHeader('X-Lumen-Token', TOKEN);
     x.upload.onprogress = e => e.lengthComputable && onProgress && onProgress(e.loaded / e.total);
-    x.onload = () => { let d = null; try { d = JSON.parse(x.responseText); } catch (e) { } if (x.status === 401 && d && d.code === 'token') tokenLost(); x.status < 300 ? res(d) : rej(new Error((d && d.detail) || `HTTP ${x.status}`)); };
-    x.onerror = () => rej(new Error('上傳失敗'));
+    x.onload = () => { let d = null; try { d = JSON.parse(x.responseText); } catch (e) { } if (x.status === 401 && d && d.code === 'token') tokenLost(); x.status < 300 ? res(d) : rej(new Error((d && d.detail) || httpMsg(x.status))); };
+    x.onerror = () => rej(new Error('上傳中斷：無法連線到 LumenSubs（主控台視窗可能已關閉）'));
     x.send(form);
   });
 }
 async function pollJob(id, onProgress) {
   for (; ;) {
     const j = await api('GET', `/api/jobs/${id}`);
-    onProgress && onProgress(j.progress);
+    onProgress && onProgress(j.progress, j.note);
     if (j.status === 'done') return j.result;
     if (j.status === 'error') throw new Error(j.error || '處理失敗');
     if (j.status === 'cancelled') { const e = new Error('已取消'); e.cancelled = true; throw e; }
@@ -120,7 +126,7 @@ const state = {
   mode: 'video', duration: 0, t: 0, playing: false, rate: 1,
   segs: [], selId: null, activeId: null,
   srcLang: 'auto', detected: '', tgtLang: 'zh-TW', tone: 'natural',
-  opts: { keepNames: true, context: true, proofread: true, viz: true },
+  opts: { keepNames: true, context: true, proofread: true, viz: true, translate: true },
   zoom: 64, follow: true, query: '', audioAR: 16 / 9, arKey: '16:9', videoAR: 16 / 9,
 };
 const DEFAULT_STYLE = {
@@ -130,14 +136,13 @@ const DEFAULT_STYLE = {
   src: { font: 'Manrope', size: 36, weight: 600, color: '#cfeaff', stroke: 2, strokeColor: '#0b2545' },
 };
 let style = JSON.parse(JSON.stringify(DEFAULT_STYLE));
-const project = { id: null, name: '未命名專案', media: {} };
+const project = { id: null, name: '未命名專案', media: {}, rev: 0 };
 let editTrack = 'tgt', styleVer = 0, busy = null;
 
 /* ---------------- time helpers ---------------- */
 const pad = (n, w = 2) => String(n).padStart(w, '0');
 function fmt(t) { t = Math.max(0, t || 0); const ms = Math.round(t * 1000); const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60; return `${pad(m)}:${pad(s)}.${pad(ms % 1000, 3)}`; }
 function fmtShort(t) { t = Math.max(0, t || 0); const h = Math.floor(t / 3600); return (h ? h + ':' : '') + `${pad(Math.floor(t % 3600 / 60))}:${pad(Math.floor(t % 60))}`; }
-function fmtFull(t, sep = ',') { const ms = Math.round(Math.max(0, t) * 1000); const h = Math.floor(ms / 3600000), m = Math.floor(ms / 60000) % 60, s = Math.floor(ms / 1000) % 60; return `${pad(h)}:${pad(m)}:${pad(s)}${sep}${pad(ms % 1000, 3)}`; }
 function parseTC(str) {
   str = String(str).trim().replace(',', '.'); if (!str) return NaN;
   const p = str.split(':').map(Number); if (p.some(isNaN)) return NaN;
@@ -147,7 +152,13 @@ const sizeStr = b => b > 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(
 
 /* ---------------- history ---------------- */
 const hist = { u: [], r: [] };
-function snap() { hist.u.push(JSON.stringify(state.segs)); if (hist.u.length > 150) hist.u.shift(); hist.r = []; updHist(); }
+function snap() { lastSnap.key = ''; hist.u.push(JSON.stringify(state.segs)); if (hist.u.length > 150) hist.u.shift(); hist.r = []; updHist(); }
+// several quick changes of the same value (↑↓ on a time code) → a single undo step
+const lastSnap = { key: '', at: 0 };
+function snapOnce(key) {
+  if (lastSnap.key === key && Date.now() - lastSnap.at < 2000) { lastSnap.at = Date.now(); return; }
+  snap(); lastSnap.key = key; lastSnap.at = Date.now();
+}
 function undo() { if (!hist.u.length) return; hist.r.push(JSON.stringify(state.segs)); state.segs = JSON.parse(hist.u.pop()); segsChanged(); toast('已復原'); }
 function redo() { if (!hist.r.length) return; hist.u.push(JSON.stringify(state.segs)); state.segs = JSON.parse(hist.r.pop()); segsChanged(); toast('已重做'); }
 function updHist() { $('#undoBtn').disabled = !hist.u.length; $('#redoBtn').disabled = !hist.r.length; }
@@ -181,17 +192,28 @@ const refreshSegs = () => $$('.seg').forEach(placeSeg);
 /* ---------------- custom select ---------------- */
 const pop = $('#pop'); let popAnchor = null;
 function closePop() { pop.classList.remove('show'); pop.onclick = null; popAnchor && popAnchor.classList.remove('open'); popAnchor = null; }
+// arrow keys / Enter / Esc inside a popup list whose items are focusable
+function popKeys(list, onEnter) {
+  list.onkeydown = e => {
+    const items = $$('.pop-item', list), i = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); e.stopPropagation();
+      const n = items[clamp(i + (e.key === 'ArrowDown' ? 1 : -1), 0, items.length - 1)]; n && n.focus();
+    } else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) { e.preventDefault(); e.stopPropagation(); onEnter(items[i]); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); const a = popAnchor; closePop(); a && a.focus(); }
+  };
+}
 function openPop(anchor, opts, cur, pick, searchable = true) {
   if (popAnchor === anchor) { closePop(); return; }
   closePop(); popAnchor = anchor; anchor.classList.add('open');
-  pop.innerHTML = (searchable ? `<div class="pop-search">${ICON.search}<input placeholder="搜尋…"></div>` : '') + '<div class="pop-list scroll"></div>';
+  pop.innerHTML = (searchable ? `<div class="pop-search">${ICON.search}<input placeholder="搜尋…" aria-label="搜尋"></div>` : '') + '<div class="pop-list scroll" role="listbox"></div>';
   const list = $('.pop-list', pop), inp = $('input', pop);
   let items = [], kb = 0;
   const draw = q => {
     q = (q || '').toLowerCase();
     items = opts.filter(o => !q || (o.l + o.n + o.v).toLowerCase().includes(q));
     kb = Math.max(0, items.findIndex(o => o.v === cur)); if (q) kb = 0;
-    list.innerHTML = items.map((o, i) => `<div class="pop-item ${o.v === cur ? 'on' : ''} ${i === kb && q ? 'kb' : ''}" data-v="${o.v}"><span style="${o.font ? `font-family:'${o.font}'` : ''}">${esc(o.l)}</span><small>${esc(o.n)}</small>${o.v === cur ? ICON.check : ''}</div>`).join('') || '<div class="pop-empty">找不到符合的項目</div>';
+    list.innerHTML = items.map((o, i) => `<div class="pop-item ${o.v === cur ? 'on' : ''} ${i === kb && q ? 'kb' : ''}" data-v="${o.v}" role="option" tabindex="-1" aria-selected="${o.v === cur}"><span style="${o.font ? `font-family:'${o.font}'` : ''}">${esc(o.l)}</span><small>${esc(o.n)}</small>${o.v === cur ? ICON.check : ''}</div>`).join('') || '<div class="pop-empty">找不到符合的項目</div>';
   };
   draw('');
   const r = anchor.getBoundingClientRect();
@@ -209,8 +231,11 @@ function openPop(anchor, opts, cur, pick, searchable = true) {
         $$('.pop-item', list).forEach((x, i) => x.classList.toggle('kb', i === kb)); $$('.pop-item', list)[kb]?.scrollIntoView({ block: 'nearest' });
       }
       if (e.key === 'Enter' && items[kb]) { pick(items[kb].v); closePop(); }
-      if (e.key === 'Escape') closePop();
+      if (e.key === 'Escape') { const a = popAnchor; closePop(); a && a.focus(); }
     };
+  } else {
+    popKeys(list, it => { pick(it.dataset.v); const a = popAnchor; closePop(); a && a.focus(); });
+    requestAnimationFrame(() => { const f = $('.pop-item.on', list) || $('.pop-item', list); f && f.focus({ preventScroll: true }); });
   }
   list.onclick = e => { const it = e.target.closest('.pop-item'); if (it) { pick(it.dataset.v); closePop(); } };
 }
@@ -335,7 +360,7 @@ const VIZ_FPS = 30, VIZ_BANDS = 28;
 async function loadViz(url) {
   vizData = null;
   if (!url) return;
-  try { const r = await fetch(url); vizData = new Uint8Array(await r.arrayBuffer()); } catch (e) { vizData = null; }
+  try { const r = await fetch(url, { headers: { 'X-Lumen-Token': TOKEN } }); if (r.ok) vizData = new Uint8Array(await r.arrayBuffer()); } catch (e) { vizData = null; }
 }
 let lastVizF = -1;
 function vizFrame(t) {
@@ -415,7 +440,7 @@ const sliderToZoom = v => ZMIN * Math.pow(ZMAX / ZMIN, v / 1000);
 let peaks = null; // Uint8Array @50/s
 async function loadPeaks(url) {
   peaks = null;
-  if (url) { try { peaks = new Uint8Array(await (await fetch(url)).json()); } catch (e) { peaks = null; } }
+  if (url) { try { peaks = new Uint8Array(await api('GET', url)); } catch (e) { peaks = null; } }
   drawTimelineCanvases();
 }
 function renderTimeline() {
@@ -441,7 +466,7 @@ function drawTimelineCanvases() {
     const isMaj = Math.abs(t / major - Math.round(t / major)) < 1e-6;
     g.fillStyle = isMaj ? 'rgba(110,150,200,.6)' : 'rgba(110,150,200,.35)';
     g.fillRect(x, rh - (isMaj ? 9 : 5), 1, isMaj ? 9 : 5);
-    if (isMaj) { g.fillStyle = '#7c93ae'; g.fillText(fmtShort(t) + (major < 1 ? '.' + String(Math.round((t % 1) * 10)) : ''), x + 4, rh - 10); }
+    if (isMaj) { g.fillStyle = '#566b87'; g.fillText(fmtShort(t) + (major < 1 ? '.' + String(Math.round((t % 1) * 10)) : ''), x + 4, rh - 10); }
   }
   // wave
   const wh = 56;
@@ -492,9 +517,11 @@ track.addEventListener('pointerdown', e => {
     const d = (ev.clientX - o.x) / state.zoom;
     if (!moved && Math.abs(ev.clientX - o.x) < 3) return;
     if (!moved) { moved = true; snap(); }
-    if (mode === 'm') { const len = o.e - o.s; const ns = clamp(o.s + d, prevEnd, nextStart - len); s.start = +ns.toFixed(3); s.end = +(ns + len).toFixed(3); }
-    else if (mode === 'l') s.start = +clamp(o.s + d, prevEnd, s.end - 0.2).toFixed(3);
-    else s.end = +clamp(o.e + d, s.start + 0.2, nextStart).toFixed(3);
+    // a range whose lower bound exceeds its upper one (cue shorter than 0.2 s,
+    // neighbours touching) means there is no room: leave the value alone
+    if (mode === 'm') { const len = o.e - o.s; if (prevEnd <= nextStart - len) { const ns = clamp(o.s + d, prevEnd, nextStart - len); s.start = +ns.toFixed(3); s.end = +(ns + len).toFixed(3); } }
+    else if (mode === 'l') { const hi = s.end - 0.2; if (prevEnd <= hi) s.start = +clamp(o.s + d, prevEnd, hi).toFixed(3); }
+    else { const lo = s.start + 0.2, hi = nextStart; if (lo <= hi) s.end = +clamp(o.e + d, lo, hi).toFixed(3); }
     posBlock(s); updCueTimes(s); $('#tlSel').textContent = `#${pad(i + 1)}  ${fmt(s.start)} → ${fmt(s.end)}  (${(s.end - s.start).toFixed(2)}s)`;
     frame(true);
   };
@@ -546,6 +573,7 @@ function cueHTML(s, i) {
       <input class="tc" data-k="end" value="${fmt(s.end)}" spellcheck="false" title="↑↓ 微調 0.1s，Shift 1s" aria-label="第 ${i + 1} 句結束時間">
       <span class="dur">${(s.end - s.start).toFixed(1)}s</span>
       ${cps(s) > cpsLimit() ? '<span class="cps" title="閱讀速度偏快，建議延長顯示時間或精簡譯文"></span>' : ''}
+      ${s.src_orig ? `<button class="fix-badge" data-a="unfix" title="AI 校正了辨識結果。原本辨識為：「${esc(s.src_orig)}」。點擊還原" aria-label="第 ${i + 1} 句原文經 AI 校正，點擊還原為：${esc(s.src_orig)}">AI 校正</button>` : ''}
       <div class="cue-actions">
         <button class="icon-btn" data-a="re" data-tip="重新翻譯" aria-label="重新翻譯第 ${i + 1} 句">${ICON.refresh}</button>
         <button class="icon-btn" data-a="split" data-tip="分割" aria-label="分割第 ${i + 1} 句">${ICON.split}</button>
@@ -609,25 +637,26 @@ cueList.addEventListener('input', e => {
   const b = track.querySelector(`.cue-blk[data-id="${s.id}"]`); if (b) { $('b', b).textContent = s.tgt; $('small', b).textContent = s.src; }
   renderSubs(); updStats(); scheduleSave();
 });
-function commitTC(inp) {
+function commitTC(inp, nudge) {
   const s = state.segs.find(x => x.id === +inp.closest('.cue').dataset.id); if (!s) return;
   const v = parseTC(inp.value), k = inp.dataset.k, i = state.segs.indexOf(s);
   const lo = k === 'start' ? (i > 0 ? state.segs[i - 1].end : 0) : s.start + 0.2;
   const hi = k === 'start' ? s.end - 0.2 : (i < state.segs.length - 1 ? state.segs[i + 1].start : state.duration || 1e9);
   if (isNaN(v) || lo > hi) { inp.classList.add('bad'); setTimeout(() => inp.classList.remove('bad'), 700); inp.value = fmt(s[k]); return; }
   const nv = +clamp(v, lo, hi).toFixed(3);
-  if (nv !== s[k]) { snap(); s[k] = nv; posBlock(s); frame(true); scheduleSave(); }
+  if (nv !== s[k]) { nudge ? snapOnce(`tc:${s.id}:${k}`) : snap(); s[k] = nv; posBlock(s); frame(true); scheduleSave(); }
   if (Math.abs(nv - v) > 0.0005) { inp.classList.add('bad'); setTimeout(() => inp.classList.remove('bad'), 700); }
   inp.value = fmt(s[k]); updCueTimes(s);
 }
 cueList.addEventListener('keydown', e => {
   const inp = e.target;
+  if (e.isComposing || e.keyCode === 229) return;          // Enter that confirms an IME candidate
   if (inp.matches('textarea') && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); inp.blur(); return; }
   if (!inp.matches('.tc')) return;
   if (e.key === 'Enter') { inp.blur(); return; }
   if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
     e.preventDefault(); const v = parseTC(inp.value); if (isNaN(v)) return;
-    inp.value = fmt(v + (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 1 : 0.1)); commitTC(inp);
+    inp.value = fmt(v + (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 1 : 0.1)); commitTC(inp, true);
   }
 });
 cueList.addEventListener('focusout', e => { if (e.target.matches('.tc')) commitTC(e.target); });
@@ -645,16 +674,29 @@ async function cueAction(a, id) {
     if (!s.src.trim()) { toast('此句沒有原文', 'info'); return; }
     const c = cueList.querySelector(`.cue[data-id="${id}"]`); c && c.classList.add('busy');
     try {
+      if (!(await readyToTranslate())) { c && c.classList.remove('busy'); return; }
       const pid0 = await ensureProject();
+      const sent = s.tgt;
       const d = await api('POST', `/api/projects/${pid0}/retranslate`, {
         segs: state.segs.map(x => ({ src: x.src, tgt: x.tgt })), index: i, src_lang: srcLangCode(), tgt_lang: state.tgtLang,
         tone: state.tone, opts: tOpts(), current: s.tgt,
       });
-      if (project.id !== pid0 || !state.segs.includes(s)) { c && c.classList.remove('busy'); return; }
-      if (d.tgt) { snap(); s.tgt = d.tgt; const ta = c && $('textarea.tgt', c); if (ta) { ta.value = s.tgt; autoH(ta); } const b = track.querySelector(`.cue-blk[data-id="${id}"] b`); if (b) b.textContent = s.tgt; renderSubs(true); updStats(); scheduleSave(); toast(`第 ${i + 1} 句已重新翻譯`, 'spark'); }
+      if (project.id !== pid0) { c && c.classList.remove('busy'); return; }
+      if (!state.segs.includes(s)) { toast(`字幕已變動（例如按了復原），新譯文未套用：${d.tgt || ''}`, 'info', 6000); c && c.classList.remove('busy'); return; }
+      if (d.tgt && s.tgt !== sent && !confirm(`這句譯文在等待期間已被修改。\n\n要改用 AI 的新譯文嗎？\n「${d.tgt}」`)) { c && c.classList.remove('busy'); return; }
+      if (d.tgt) { snap(); s.tgt = d.tgt; const ta = cueList.querySelector(`.cue[data-id="${id}"] textarea.tgt`); if (ta) { ta.value = s.tgt; autoH(ta); } const b = track.querySelector(`.cue-blk[data-id="${id}"] b`); if (b) b.textContent = s.tgt; renderSubs(true); updStats(); scheduleSave(); toast(`第 ${i + 1} 句已重新翻譯`, 'spark'); }
     } catch (e) { toast(e.message, 'warn', 4000); }
     c && c.classList.remove('busy'); return;
   }
+  if (a === 'unfix') {
+    if (!s.src_orig) return;
+    snap(); s.src = s.src_orig; delete s.src_orig; segsChanged(); toast('已還原為原本的辨識結果', 'info'); return;
+  }
+  // F16: check first, so an action that cannot happen leaves undo/redo alone
+  if (a === 'split' && s.end - s.start < 0.4) { toast('字幕太短，無法分割', 'info'); return; }
+  if (a === 'merge' && !state.segs[i + 1]) { toast('已是最後一句', 'info'); return; }
+  const gapEnd = a === 'add' ? (state.segs[i + 1] ? state.segs[i + 1].start : mediaEnd(s.end + 3)) : 0;
+  if (a === 'add' && gapEnd - s.end < 0.4) { toast('此處空隙不足，請先縮短字幕', 'info'); return; }
   snap();
   if (a === 'split') {
     const at = state.t > s.start + .2 && state.t < s.end - .2 ? state.t : (s.start + s.end) / 2;
@@ -663,14 +705,12 @@ async function cueAction(a, id) {
     const n = { id: uid++, start: +at.toFixed(3), end: s.end, src: s2, tgt: t2 };
     s.end = +at.toFixed(3); s.src = s1; s.tgt = t1; state.segs.splice(i + 1, 0, n); toast('已分割字幕', 'split');
   } else if (a === 'merge') {
-    const n = state.segs[i + 1]; if (!n) { hist.u.pop(); updHist(); toast('已是最後一句', 'info'); return; }
+    const n = state.segs[i + 1];
     const cjkEnd = /[　-ヿ㐀-鿿＀-￯]$/, cjkTgt = ['zh-TW', 'zh-CN', 'yue', 'ja'].includes(state.tgtLang);
     const join = (a, b, glue) => (a && b ? a + glue + b : a + b).trim();
     s.end = n.end; s.src = join(s.src, n.src, cjkEnd.test(s.src) ? '' : ' '); s.tgt = join(s.tgt, n.tgt, cjkTgt ? (cjkEnd.test(s.tgt) ? '' : ' ') : ' ');
     state.segs.splice(i + 1, 1); toast('已合併字幕', 'merge');
   } else if (a === 'add') {
-    const nx = state.segs[i + 1], gapEnd = nx ? nx.start : state.duration;
-    if (gapEnd - s.end < 0.4) { hist.u.pop(); updHist(); toast('此處空隙不足，請先縮短字幕', 'info'); return; }
     const n = { id: uid++, start: +(s.end + .05).toFixed(3), end: +Math.min(gapEnd - .05, s.end + 2.5).toFixed(3), src: '', tgt: '' };
     state.segs.splice(i + 1, 0, n); state.selId = n.id; segsChanged();
     setTimeout(() => { const ta = cueList.querySelector(`.cue[data-id="${n.id}"] textarea.src`); ta && ta.focus(); }, 30); return;
@@ -679,6 +719,8 @@ async function cueAction(a, id) {
   }
   segsChanged();
 }
+// end of the timeline: the media length, or (subtitles only) open-ended
+function mediaEnd(fallback) { return project.media[state.mode] && state.duration ? state.duration : fallback; }
 function insertAtPlayhead() {
   const t = state.t;
   if (!state.duration) { toast('請先載入媒體', 'info'); return; }
@@ -693,6 +735,7 @@ function splitAtPlayhead() { const s = state.segs.find(s => state.t > s.start + 
 $('#tlAdd').onclick = insertAtPlayhead; $('#tlSplit').onclick = splitAtPlayhead;
 
 function segsChanged() {
+  if (!project.media[state.mode]) updDuration();        // subtitles only: the timeline follows the last cue
   renderList(); renderTimeline(); updStats(); updHist(); renderSubs(true); updGenButtons();
   if (state.selId) select(state.selId, false);
   scheduleSave();
@@ -713,15 +756,16 @@ let offset = 0;
 const showOff = () => $('#offset').value = (offset >= 0 ? '+' : '') + offset.toFixed(2) + 's';
 $('#offMinus').onclick = () => { offset = +(offset - .1).toFixed(2); showOff(); };
 $('#offPlus').onclick = () => { offset = +(offset + .1).toFixed(2); showOff(); };
-$('#offset').addEventListener('change', e => { const v = parseFloat(e.target.value.replace(/[^\d.\-+]/g, '')); offset = isNaN(v) ? 0 : v; showOff(); });
+$('#offset').addEventListener('change', e => { const v = parseFloat(e.target.value.replace(',', '.').replace(/[^\d.\-+]/g, '')); offset = isNaN(v) ? 0 : v; showOff(); });
 $('#offApply').onclick = () => {
   if (!offset) { toast('請先設定偏移量', 'info'); return; }
-  snap(); const D = state.duration || 1e9;
+  const hasMedia = !!project.media[state.mode];
+  snap(); const D = hasMedia && state.duration ? state.duration : 1e9;
   state.segs.forEach(s => { s.start = +clamp(s.start + offset, 0, D).toFixed(3); s.end = +clamp(s.end + offset, 0, D).toFixed(3); });
   const before = state.segs.length;
   state.segs = state.segs.filter(s => s.end - s.start > 0.05);
   const dropped = before - state.segs.length;
-  toast(`全部字幕已${offset > 0 ? '延後' : '提前'} ${Math.abs(offset).toFixed(2)} 秒${dropped ? `，${dropped} 句超出影片範圍已移除（可 Ctrl+Z 復原）` : ''}`, dropped ? 'warn' : 'ok', dropped ? 5000 : 2600); offset = 0; showOff(); segsChanged();
+  toast(`全部字幕已${offset > 0 ? '延後' : '提前'} ${Math.abs(offset).toFixed(2)} 秒${dropped ? `，${dropped} 句${hasMedia ? '超出媒體範圍' : '移到 0 秒之前'}已移除（可 Ctrl+Z 復原）` : ''}`, dropped ? 'warn' : 'ok', dropped ? 5000 : 2600); offset = 0; showOff(); segsChanged();
 };
 
 /* ---------------- style panel ---------------- */
@@ -823,13 +867,14 @@ $$('[data-toggle]').forEach(row => row.addEventListener('click', () => {
   if (k === 'balance') { style.balance = on; bumpStyle(); return; }
   state.opts[k] = on;
   if (k === 'viz') { $('#viz').classList.toggle('off', !on); }
+  if (k === 'translate') updGenButtons();
   scheduleSave();
 }));
 const tOpts = () => ({ keep_names: state.opts.keepNames, context: state.opts.context, proofread: state.opts.proofread });
 function syncLeftInputs() {
   srcSel.set(state.srcLang); tgtSel.set(state.tgtLang);
   $$('#toneChips .chip').forEach(x => x.classList.toggle('on', x.dataset.v === state.tone));
-  ['keepNames', 'context', 'proofread', 'viz'].forEach(k => { const r = $(`[data-toggle="${k}"] .sw`); r && r.classList.toggle('on', !!state.opts[k]); });
+  ['keepNames', 'context', 'proofread', 'viz', 'translate'].forEach(k => { const r = $(`[data-toggle="${k}"] .sw`); r && r.classList.toggle('on', !!state.opts[k]); });
   $('#viz').classList.toggle('off', !state.opts.viz);
   setSeg('#arSeg', state.arKey); setSeg('#modeSeg', state.mode);
   updLangHeads(); renderDetect();
@@ -853,11 +898,13 @@ async function saveNow() {
   saving = true; dirty = false;
   const pid = project.id, ack = pendingAck;
   try {
-    await api('PUT', `/api/projects/${pid}`, { name: $('#projName').value.trim() || '未命名專案', state: serial(), ...(ack ? { ack_job: ack } : {}) });
+    const r = await api('PUT', `/api/projects/${pid}`, { name: $('#projName').value.trim() || '未命名專案', state: serial(), base_rev: project.rev, ...(ack ? { ack_job: ack } : {}) });
+    if (project.id === pid) project.rev = r.rev;
     saveFails = 0; if (pendingAck === ack) pendingAck = null;
     if (!dirty) dropBackup(pid);
     const d = new Date(); setSaved(`已自動儲存 ${pad(d.getHours())}:${pad(d.getMinutes())}`);
   } catch (e) {
+    if (e.status === 409 && e.code === 'conflict' && project.id === pid) { saving = false; await resolveConflict(pid); return; }
     // keep the edits: mark dirty again, back them up locally and retry with backoff
     dirty = true; saveFails++; writeBackup();
     setSaved(saveFails > 2 ? '儲存失敗，稍後自動重試（已備份在本機）' : '儲存失敗，重試中…', false);
@@ -865,24 +912,43 @@ async function saveNow() {
   }
   saving = false;
 }
+// another window (or a stale backup) saved this project since we loaded it
+async function resolveConflict(pid) {
+  clearTimeout(saveTimer);
+  const keep = confirm('這個專案已在另一個視窗中被修改並儲存。\n\n按「確定」：用這個視窗目前的內容覆蓋。\n按「取消」：放棄這個視窗的修改，改為載入已儲存的版本。');
+  if (keep) {
+    try {
+      const r = await api('PUT', `/api/projects/${pid}`, { name: $('#projName').value.trim() || '未命名專案', state: serial(), force: true });
+      project.rev = r.rev; dirty = false; dropBackup(pid); setSaved('已儲存（覆蓋其他視窗的修改）');
+    } catch (e) { toast(e.message, 'warn', 5000); }
+  } else {
+    dirty = false; dropBackup(pid);
+    try { await openProject(pid); toast('已載入最新儲存的版本'); } catch (e) { toast(e.message, 'warn', 5000); }
+  }
+}
 // local safety net: unsaved edits are mirrored to localStorage until the server has them
 const bakKey = pid => 'bak:' + pid;
 let bakTimer = 0;
 function writeBackup() {
   clearTimeout(bakTimer);
   if (!project.id || !dirty) return;
-  try { localStorage.setItem(bakKey(project.id), JSON.stringify({ t: Date.now(), name: $('#projName').value, state: serial() })); } catch (e) { }
+  try { localStorage.setItem(bakKey(project.id), JSON.stringify({ t: Date.now(), rev: project.rev, name: $('#projName').value, state: serial() })); } catch (e) { }
 }
 function backupSoon() { clearTimeout(bakTimer); bakTimer = setTimeout(writeBackup, 1500); }
 function dropBackup(pid) { try { localStorage.removeItem(bakKey(pid)); } catch (e) { } }
 function readBackup(pid) { try { const b = JSON.parse(localStorage.getItem(bakKey(pid)) || 'null'); return b && b.state ? b : null; } catch (e) { return null; } }
-async function ensureProject() {
-  if (project.id) return project.id;
-  const p = await api('POST', '/api/projects', { name: $('#projName').value.trim() || '未命名專案' });
-  project.id = p.id; project.media = {};
-  try { localStorage.setItem('lastProject', p.id); } catch (e) { }
-  scheduleSave();
-  return p.id;
+let creatingProject = null;
+function ensureProject() {
+  if (project.id) return Promise.resolve(project.id);
+  // two quick drops (audio + background image) must not create two projects
+  if (!creatingProject) creatingProject = api('POST', '/api/projects', { name: $('#projName').value.trim() || '未命名專案' })
+    .then(p => {
+      project.id = p.id; project.media = {}; project.rev = p.rev || 0;
+      try { localStorage.setItem('lastProject', p.id); } catch (e) { }
+      scheduleSave();
+      return p.id;
+    }).finally(() => { creatingProject = null; });
+  return creatingProject;
 }
 $('#projName').addEventListener('input', () => scheduleSave());
 $('#projName').addEventListener('keydown', e => { if (e.key === 'Enter') e.target.blur(); });
@@ -902,16 +968,22 @@ async function openProject(id) {
   await flushSave();
   const p = await api('GET', `/api/projects/${id}`);
   pause();
-  project.id = p.id; project.name = p.name; project.media = p.media || {};
+  project.id = p.id; project.name = p.name; project.media = p.media || {}; project.rev = p.rev || 0;
   try { localStorage.setItem('lastProject', p.id); } catch (e) { }
-  const bak = readBackup(p.id);
+  let bak = readBackup(p.id);
+  if (bak && bak.rev !== project.rev) {
+    // the project was saved again after this backup was taken (another window,
+    // another launch): only an actually newer backup may replace it, and only if the user agrees
+    const newer = bak.t > (p.updated || 0) * 1000;
+    if (!newer || !confirm('這個專案有一份尚未儲存的本機備份，但專案之後又被儲存過。\n\n按「確定」：還原本機備份（較新）。\n按「取消」：使用已儲存的版本。')) { dropBackup(p.id); bak = null; }
+  }
   $('#projName').value = (bak && bak.name) || p.name || '未命名專案';
   const st = (bak && bak.state) || p.state || {};
   style = Object.assign(JSON.parse(JSON.stringify(DEFAULT_STYLE)), st.style || {});
   style.tgt = Object.assign({}, DEFAULT_STYLE.tgt, (st.style || {}).tgt); style.src = Object.assign({}, DEFAULT_STYLE.src, (st.style || {}).src);
-  state.segs = (st.segs || []).map(s => ({ id: uid++, start: +s.start, end: +s.end, src: s.src || '', tgt: s.tgt || '' }));
+  state.segs = (st.segs || []).map(segFrom);
   state.srcLang = st.srcLang || 'auto'; state.detected = st.detected || ''; state.tgtLang = st.tgtLang || 'zh-TW'; state.tone = st.tone || 'natural';
-  state.opts = Object.assign({ keepNames: true, context: true, proofread: true, viz: true }, st.opts || {});
+  state.opts = Object.assign({ keepNames: true, context: true, proofread: true, viz: true, translate: true }, st.opts || {});
   state.arKey = st.arKey || '16:9'; { const [a, b] = state.arKey.split(':').map(Number); state.audioAR = a / b; }
   if (st.zoom) state.zoom = st.zoom;
   $('#zoom').value = zoomToSlider(state.zoom); fillRange($('#zoom'));
@@ -922,46 +994,66 @@ async function openProject(id) {
   if (st.t) seek(Math.min(st.t, state.duration || st.t));
   segsChanged();
   if (bak) { toast('已還原上次尚未儲存的編輯', 'info', 4000); } else { clearTimeout(saveTimer); dirty = false; setSaved('已開啟專案'); }
+  if (p.recovered) toast('專案檔已損毀，已從自動備份還原（可能少了最後幾秒的修改）', 'warn', 7000);
   if (p.job) resumeJob(p.id, p.job);
+  if (p.bg && (p.bg.media || p.bg.export)) resumeBg(p.id, p.bg);
+}
+// editor cue from saved data; `src_orig` marks a line the AI proofreader changed
+function segFrom(s) {
+  const o = { id: uid++, start: +s.start, end: +s.end, src: s.src || '', tgt: s.tgt || '' };
+  if (s.src_orig && s.src_orig !== o.src) o.src_orig = String(s.src_orig);
+  return o;
 }
 async function newProject() {
   await flushSave();
   pause();
-  project.id = null; project.media = {}; try { localStorage.removeItem('lastProject'); } catch (e) { }
+  project.id = null; project.media = {}; project.rev = 0; try { localStorage.removeItem('lastProject'); } catch (e) { }
   $('#projName').value = '未命名專案';
   state.segs = []; state.detected = ''; state.selId = null; hist.u = []; hist.r = []; updHist();
   style = JSON.parse(JSON.stringify(DEFAULT_STYLE)); syncStyleInputs();
-  video.removeAttribute('src'); audio.removeAttribute('src'); video.load(); audio.load();
-  peaks = null; vizData = null; bgImg.removeAttribute('src');
+  releaseMedia();
+  peaks = null; vizData = null; bgImg.removeAttribute('src'); delete bgImg.dataset.u;
   applyMediaUI(); setMode(state.mode, true); segsChanged(); setSaved('尚未儲存');
 }
 $('#projBtn').onclick = async () => {
   const btn = $('#projBtn');
   if (popAnchor === btn) { closePop(); return; }
-  let list = [];
-  try { list = await api('GET', '/api/projects'); } catch (e) { }
+  let list = [], listErr = '';
+  try { list = await api('GET', '/api/projects'); } catch (e) { listErr = e.message; }
   closePop(); popAnchor = btn; btn.classList.add('open');
   const when = ts => { const d = new Date(ts * 1000); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
-  pop.innerHTML = `<div class="pop-item new" data-new="1">${ICON.plus}<span>新增專案</span></div><div class="pop-sep"></div><div class="pop-list scroll">${list.map(p => `
-    <div class="pop-item proj-item ${p.id === project.id ? 'on' : ''}" data-id="${p.id}">
-      <span class="pi-ic">${p.mode === 'audio' ? ICON.music : ICON.film}</span>
-      <span class="pi-main"><b>${esc(p.name || '未命名專案')}</b><small>${when(p.updated)} · ${p.cues} 句${p.primary ? ' · ' + esc(p.primary) : ''}</small></span>
-      <button class="icon-btn sm pi-del" data-del="${p.id}" data-tip="刪除專案">${ICON.trash}</button>
-    </div>`).join('') || '<div class="pop-empty">還沒有專案</div>'}</div>`;
+  const total = list.reduce((a, p) => a + (p.size || 0), 0);
+  pop.innerHTML = `<div class="pop-item new" data-new="1" role="option" tabindex="-1">${ICON.plus}<span>新增專案</span></div><div class="pop-sep"></div><div class="pop-list scroll" role="listbox">${listErr
+    ? `<div class="pop-empty">無法讀取專案清單：${esc(listErr)}<br><button class="btn ghost" data-retry="1" style="margin-top:8px">重試</button></div>`
+    : list.map(p => `
+    <div class="pop-item proj-item ${p.id === project.id ? 'on' : ''} ${p.broken ? 'broken' : ''}" data-id="${esc(p.id)}" role="option" tabindex="-1">
+      <span class="pi-ic">${p.broken ? ICON.warn : p.mode === 'audio' ? ICON.music : ICON.film}</span>
+      <span class="pi-main"><b>${esc(p.name || '未命名專案')}</b><small>${when(p.updated)} · ${p.cues} 句${p.primary ? ' · ' + esc(p.primary) : ''} · ${sizeStr(p.size || 0)}</small></span>
+      <button class="icon-btn sm pi-del" data-del="${esc(p.id)}" data-tip="刪除專案" aria-label="刪除專案 ${esc(p.name || '')}">${ICON.trash}</button>
+    </div>`).join('') || '<div class="pop-empty">還沒有專案</div>'}</div>${list.length ? `<div class="pop-foot">共 ${list.length} 個專案 · 佔用 ${sizeStr(total)}</div>` : ''}`;
   const r = btn.getBoundingClientRect();
   pop.style.width = '340px'; pop.style.left = Math.max(8, r.left - 10) + 'px'; pop.style.top = r.bottom + 8 + 'px';
-  requestAnimationFrame(() => { if (popAnchor === btn) pop.classList.add('show'); });
+  requestAnimationFrame(() => { if (popAnchor === btn) { pop.classList.add('show'); const f = $('.pop-item.on', pop) || $('.pop-item', pop); f && f.focus({ preventScroll: true }); } });
+  popKeys(pop, it => it.click());
   pop.onclick = async e => {
+    if (e.target.closest('[data-retry]')) { closePop(); btn.click(); return; }
     const del = e.target.closest('[data-del]');
     if (del) {
       e.stopPropagation();
-      if (del.dataset.del === project.id && guardBusy()) return;
-      if (!confirm('確定刪除此專案？專案內的媒體與輸出檔案都會被刪除。')) return;
-      await api('DELETE', `/api/projects/${del.dataset.del}`); dropBackup(del.dataset.del);
-      if (del.dataset.del === project.id) await newProject();
-      closePop(); toast('已刪除專案', 'trash'); return;
+      const pid = del.dataset.del, cur = pid === project.id;
+      if (cur && guardBusy()) return;
+      if (!confirm('確定刪除此專案？專案內的媒體檔與暫存檔都會被刪除（已匯出到其他資料夾的檔案不受影響）。')) return;
+      if (cur) releaseMedia();          // the open video would keep its file locked
+      try {
+        const r = await api('DELETE', `/api/projects/${pid}`); dropBackup(pid);
+        if (cur) await newProject();
+        closePop();
+        r.leftover ? toast('已刪除專案；部分檔案仍被其他程式使用，會在下次啟動時清除', 'warn', 6000) : toast('已刪除專案', 'trash');
+      } catch (err) { toast(err.message, 'warn', 6000); if (cur) applyMediaUI(); }
+      return;
     }
     const it = e.target.closest('.pop-item'); if (!it) return;
+    if (it.classList.contains('broken')) { toast('這個專案檔已損毀、無法開啟（沒有可用的備份），可以刪除它', 'warn', 6000); return; }
     closePop(); pop.onclick = null;
     if (guardBusy()) return;
     if (it.dataset.new) { await newProject(); toast('已建立新專案', 'spark'); return; }
@@ -999,24 +1091,24 @@ function applyMediaUI() {
     $('#videoName').textContent = v.name;
     const i = v.info || {};
     $('#videoInfo').textContent = v.ready ? `${i.width}×${i.height} · ${fmtShort(i.duration)} · ${sizeStr(v.size || 0)}` : '處理中…';
-    if (v.preview && video.getAttribute('src') !== v.preview) { video.src = v.preview; video.volume = +$('#vol').value; }
+    if (v.preview && video.dataset.u !== v.preview) { video.src = authUrl(v.preview); video.dataset.u = v.preview; video.volume = +$('#vol').value; }
     state.videoAR = i.width && i.height ? i.width / i.height : 16 / 9;
-  } else if (video.getAttribute('src')) { video.removeAttribute('src'); video.load(); }
+  } else if (video.getAttribute('src')) { video.removeAttribute('src'); delete video.dataset.u; video.load(); }
   $('#dropVideo b').textContent = v ? '更換影片' : '拖放或點擊上傳影片';
   // audio
   $('#audioName').textContent = a ? a.name : '上傳音訊';
   $('#audioInfo').textContent = a ? (a.ready ? `${fmtShort(a.info.duration)} · ${sizeStr(a.size || 0)}` : '處理中…') : 'MP3 · WAV · M4A · FLAC';
   $('#dropAudio').classList.toggle('has', !!a);
-  if (a && a.preview && audio.getAttribute('src') !== a.preview) { audio.src = a.preview; audio.volume = +$('#vol').value; }
-  if (!a && audio.getAttribute('src')) { audio.removeAttribute('src'); audio.load(); }
+  if (a && a.preview && audio.dataset.u !== a.preview) { audio.src = authUrl(a.preview); audio.dataset.u = a.preview; audio.volume = +$('#vol').value; }
+  if (!a && audio.getAttribute('src')) { audio.removeAttribute('src'); delete audio.dataset.u; audio.load(); }
   $('#trackTitle').textContent = a ? a.name : '';
   // image
   $('#imgName').textContent = im ? im.name : '上傳背景圖';
   $('#imgInfo').textContent = im ? `${im.width}×${im.height}` : '未上傳時使用預設漸層背景';
-  $('#imgThumb').style.backgroundImage = im ? `url("${im.url}")` : '';
+  $('#imgThumb').style.backgroundImage = im ? `url("${authUrl(im.url)}")` : '';
   $('#imgThumb').classList.toggle('img', !!im);
   $('#dropImg').classList.toggle('has', !!im);
-  if (im && bgImg.getAttribute('src') !== im.url) bgImg.src = im.url;
+  if (im && bgImg.dataset.u !== im.url) { bgImg.src = authUrl(im.url); bgImg.dataset.u = im.url; }
   // stage
   const hasMedia = !!(state.mode === 'video' ? v : a);
   stage.classList.toggle('empty', !hasMedia);
@@ -1035,22 +1127,31 @@ video.addEventListener('loadedmetadata', () => {
 });
 audio.addEventListener('loadedmetadata', () => { if (state.mode === 'audio') { updDuration(); renderTimeline(); updStats(); } });
 
+// let go of the media files (a project being deleted must not keep them open)
+function releaseMedia() {
+  pause();
+  [video, audio].forEach(m => { m.removeAttribute('src'); delete m.dataset.u; m.load(); });
+}
 function setRing(id, p) { const r = $(id); if (!r) return; r.classList.toggle('on', p != null && p < 1); if (p != null) r.style.setProperty('--p', clamp(p, 0, 1)); }
+let uploading = false;          // bytes still travelling from the browser (closing the window loses them)
 async function uploadMedia(kind, f) {
-  if (busy) { toast('請等待目前工作完成', 'info'); return; }
-  const pid = await ensureProject();
+  if (busy) { toast(busy === 'upload' ? '另一個檔案正在上傳或處理，請稍候' : '請等待目前工作完成', 'info'); return; }
+  busy = 'upload';
   const ringId = kind === 'video' ? '#videoRing' : kind === 'audio' ? '#audioRing' : null;
   pause();
   const fd = new FormData(); fd.append('kind', kind); fd.append('file', f);
   const prevMedia = project.media[kind];
-  if (kind !== 'image') {
-    project.media[kind] = { name: f.name, ready: false, size: f.size, info: {} };
-    applyMediaUI(); setRing(ringId, 0.001);
-    if (kind === 'video') { $('#videoCard .file-thumb').style.backgroundImage = ''; }
-  }
-  busy = 'upload';
+  let pid = null;
   try {
-    const d = await uploadXHR(`/api/projects/${pid}/media`, fd, p => setRing(ringId, p * 0.5));
+    pid = await ensureProject();
+    await api('POST', `/api/projects/${pid}/media/check`, { size: f.size });
+    if (kind !== 'image') {
+      project.media[kind] = { name: f.name, ready: false, size: f.size, info: {} };
+      applyMediaUI(); setRing(ringId, 0.001);
+      if (kind === 'video') { $('#videoCard .file-thumb').style.backgroundImage = ''; }
+    }
+    uploading = true;
+    const d = await uploadXHR(`/api/projects/${pid}/media`, fd, p => setRing(ringId, p * 0.5)).finally(() => { uploading = false; });
     let res = d;
     if (d.job) res = await pollJob(d.job, p => setRing(ringId, 0.5 + p * 0.5));
     if (project.id !== pid) { busy = null; return; }
@@ -1072,7 +1173,7 @@ async function uploadMedia(kind, f) {
     scheduleSave();
   } catch (e) {
     setRing(ringId, null);
-    if (project.id === pid && kind !== 'image') {
+    if (pid && project.id === pid && kind !== 'image') {
       if (prevMedia) project.media[kind] = prevMedia; else delete project.media[kind];
       applyMediaUI();
     }
@@ -1106,16 +1207,32 @@ let impData = null;
 async function importSubs(f) {
   if (busy || exporting) { toast('請等待目前工作完成', 'info'); return; }
   if (f.size > 20e6) { toast('字幕檔過大（超過 20 MB）', 'warn'); return; }
-  let parsed = null;
-  try { parsed = SubParse.parse(SubParse.decode(await f.arrayBuffer()), f.name); } catch (e) { }
-  if (!parsed || !parsed.cues.length) { toast('無法讀取這個字幕檔，或檔案中沒有字幕', 'warn', 5000); return; }
-  impData = { name: f.name, ...parsed };
-  const last = parsed.cues[parsed.cues.length - 1].end;
-  $('#impInfo').textContent = `${f.name} · ${parsed.format.toUpperCase()} · ${parsed.cues.length} 句 · ${fmtShort(last)}`;
+  const buf = await f.arrayBuffer();
+  if (!impParse(buf, f.name, '')) { toast('無法讀取這個字幕檔，或檔案中沒有字幕（若是特殊編碼，請先轉存為 UTF-8）', 'warn', 6000); return; }
+  $('#impEnc').value = '';
   $('#impWarn').hidden = !state.segs.length;
-  setSeg('#impMode', SubParse.guessMode(parsed.cues, state.tgtLang));
+  setSeg('#impMode', SubParse.guessMode(impData.cues, state.tgtLang));
   openModal('#importModal'); updImpPreview();
 }
+// decode (auto-detected or chosen encoding) + parse into impData; false when nothing usable
+function impParse(buf, name, enc) {
+  let parsed = null, info = null;
+  try { info = SubParse.decodeInfo(buf, enc || undefined); parsed = SubParse.parse(info.text, name); } catch (e) { }
+  if (!parsed || !parsed.cues.length) return false;
+  impData = { name, buf, encoding: info.encoding, ...parsed };
+  const last = parsed.cues[parsed.cues.length - 1].end, st = parsed.stats || {};
+  $('#impInfo').textContent = `${name} · ${parsed.format.toUpperCase()} · ${SubParse.ENC_LABEL[info.encoding] || info.encoding} · ${parsed.cues.length} 句 · ${fmtShort(last)}`;
+  const notes = [st.merged && `${st.merged} 組同時開始的字幕已合併為一句`, st.trimmed && `${st.trimmed} 句與下一句時間重疊，已縮短`,
+    st.dropped && `${st.dropped} 句太短（不到 0.05 秒）已略過`].filter(Boolean);
+  $('#impNotes').hidden = !notes.length;
+  $('#impNotes').textContent = notes.length ? '編輯器的字幕不能重疊：' + notes.join('；') + '。' : '';
+  return true;
+}
+$('#impEnc').addEventListener('change', e => {
+  if (!impData) return;
+  if (!impParse(impData.buf, impData.name, e.target.value)) toast('用這個編碼讀不到字幕', 'warn');
+  updImpPreview();
+});
 function updImpPreview() {
   if (!impData) return;
   const segs = SubParse.toSegs(impData.cues.slice(0, 8), segVal('#impMode'));
@@ -1146,11 +1263,38 @@ initSeg('#arSeg', v => { const [a, b] = v.split(':').map(Number); state.audioAR 
 /* ---------------- generate / translate ---------------- */
 let curJob = null;
 function updGenButtons() {
-  const has = state.segs.length > 0;
-  if (!busy) $('#genTxt').textContent = has ? '重新生成字幕' : '生成字幕';
+  const has = state.segs.length > 0, tr = state.opts.translate;
+  if (!busy) $('#genTxt').textContent = (has ? '重新生成字幕' : '生成字幕') + (tr ? '' : '（僅轉錄）');
   $('#retrBtn').hidden = !has || !!busy;
 }
-function setBusy(kind, p, label) {
+const fmtNum = n => (n || 0).toLocaleString();
+const fmtUsage = u => u && u.requests ? `（用量：輸入 ${fmtNum(u.prompt)}、輸出 ${fmtNum(u.completion)} tokens）` : '';
+// the first translation sends transcripts to the configured service: say so once, per service
+function ensureConsent() {
+  const host = settingsCache.api_host || 'api.deepseek.com';
+  if (settingsCache.consent_host === host) return Promise.resolve(true);
+  $('#consentHost').textContent = host;
+  $('#consentDeepseek').hidden = !/deepseek\.com$/.test(host);
+  openModal('#consentModal');
+  return new Promise(res => {
+    const done = async ok => {
+      $('#consentOk').onclick = $('#consentNo').onclick = null; closeModal('#consentModal');
+      if (ok) { try { settingsCache = Object.assign(settingsCache, await api('POST', '/api/settings', { consent_host: host })); } catch (e) { } }
+      res(ok);
+    };
+    $('#consentOk').onclick = () => done(true); $('#consentNo').onclick = () => done(false);
+    $('#consentModal')._onclose = () => done(false);
+  });
+}
+// API key present and the user agreed to send transcripts to the service
+async function readyToTranslate() {
+  if (!settingsCache.api_key_set) {
+    toast('尚未設定翻譯服務的 API Key，請到「設定 → 翻譯」填寫', 'warn', 5000); $('#settingsBtn').click(); return false;
+  }
+  return ensureConsent();
+}
+function setBusy(kind, p, label, note) {
+  if (note) label = note.replace(/…$/, '');
   const b = $('#genBtn');
   if (kind) {
     busy = kind; b.classList.add('loading'); $('#cancelBtn').hidden = false; $('#retrBtn').hidden = true;
@@ -1167,13 +1311,16 @@ function setBusy(kind, p, label) {
 $('#cancelBtn').onclick = async () => { if (curJob) { try { await api('POST', `/api/jobs/${curJob}/cancel`); } catch (e) { } } };
 function applyGenResult(res, resumed) {
   snap();
-  state.segs = res.segs.map(s => ({ id: uid++, start: +s.start, end: +s.end, src: s.src, tgt: s.tgt || '' }));
+  state.segs = res.segs.map(segFrom);
   state.detected = res.detected || ''; state.selId = null;
   segsChanged(); renderDetect(); updLangHeads(); seek(0);
-  const n = state.segs.length, pre = resumed ? '已套用背景完成的生成結果 · ' : '';
+  const n = state.segs.length, pre = resumed ? '已套用背景完成的生成結果 · ' : '', use = fmtUsage(res.usage);
   if (res.translate_error) toast(pre + '轉錄完成，但翻譯失敗：' + res.translate_error, 'warn', 7000);
-  else if (res.translate_failed) toast(`${pre}共 ${n} 句，其中 ${res.translate_failed} 句翻譯失敗，可在該句按「重新翻譯」`, 'warn', 7000);
-  else toast(`${pre}字幕已生成 · 共 ${n} 句`, 'spark');
+  else if (res.translate_failed) toast(`${pre}共 ${n} 句，其中 ${res.translate_failed} 句翻譯失敗，可在該句按「重新翻譯」${use}`, 'warn', 7000);
+  else toast(`${pre}字幕已生成 · 共 ${n} 句${use}`, 'spark', 4000);
+  const fixed = state.segs.filter(x => x.src_orig).length;
+  if (fixed) setTimeout(() => toast(`有 ${fixed} 句原文經 AI 校正辨識錯字（標示「AI 校正」，點擊可還原）`, 'info', 6000), 600);
+  if (res.aligned != null && res.aligned < 0.95) setTimeout(() => toast('此語言沒有字級對齊模型，部分字幕時間是依語音段落估算的，建議播放檢查', 'info', 7000), 1200);
 }
 function applyTrResult(res, ids) {
   if (!ids) {                         // resumed after a reload: map by position
@@ -1182,10 +1329,18 @@ function applyTrResult(res, ids) {
   }
   snap();
   const byId = new Map(state.segs.map(s => [s.id, s]));
-  ids.forEach((id, i) => { const s = byId.get(id); if (s && res.tgt[i]) s.tgt = res.tgt[i]; });
+  let skipped = 0;
+  ids.forEach((id, i) => {
+    const s = byId.get(id); if (!s || !res.tgt[i]) return;
+    // the line was split, merged or edited while translating: its translation no longer fits
+    if (res.src && s.src !== res.src[i]) { skipped++; return; }
+    s.tgt = res.tgt[i];
+  });
   segsChanged();
-  if (res.failed) toast(`已重新翻譯為${langOf(state.tgtLang).l}，其中 ${res.failed} 句失敗（保留原譯文）`, 'warn', 6000);
-  else toast(`已重新翻譯為${langOf(state.tgtLang).l}`, 'spark');
+  const lang = langOf(state.tgtLang).l, use = fmtUsage(res.usage);
+  const skip = skipped ? `；${skipped} 句的原文在翻譯期間被修改，保留原譯文` : '';
+  if (res.failed || skipped) toast(`已重新翻譯為${lang}${res.failed ? `，其中 ${res.failed} 句失敗（保留原譯文）` : ''}${skip}${use}`, 'warn', 7000);
+  else toast(`已重新翻譯為${lang}${use}`, 'spark', 4000);
 }
 // a job recorded in project.json: still running → reattach; finished while the
 // window was closed → apply its stored result
@@ -1196,7 +1351,7 @@ async function resumeJob(pid, j) {
   try {
     if (!res) {
       attached = true; curJob = j.id; setBusy(bk, 0, label);
-      res = await pollJob(j.id, p => setBusy(bk, p, label));
+      res = await pollJob(j.id, (p, note) => setBusy(bk, p, label, note));
     }
     if (project.id !== pid) return;
     if (gen) applyGenResult(res, true); else applyTrResult(res, null);
@@ -1207,21 +1362,27 @@ async function resumeJob(pid, j) {
   } finally { if (attached) { curJob = null; setBusy(null); } }
 }
 $('#genBtn').onclick = async () => {
-  if (busy) return;
+  if (busy) { toast(busy === 'upload' ? '媒體正在上傳或處理，完成後即可生成字幕' : '請等待目前的工作完成', 'info'); return; }
   const med = project.media[state.mode];
   if (!med) { toast(state.mode === 'video' ? '請先上傳影片' : '請先上傳音訊', 'info'); (state.mode === 'video' ? $('#fileVideo') : $('#fileAudio')).click(); return; }
   if (!med.ready) { toast('媒體仍在處理中，請稍候', 'info'); return; }
-  if (state.segs.length && !confirm('重新生成會覆蓋目前的字幕（可用 Ctrl+Z 復原）。確定繼續？')) return;
+  let translate = state.opts.translate;
+  if (translate && !settingsCache.api_key_set) {
+    if (!confirm('尚未設定翻譯服務的 API Key。\n\n按「確定」：這次只在本機轉錄（不翻譯）。\n按「取消」：先去設定 API Key。')) { $('#settingsBtn').click(); return; }
+    translate = false;
+  }
+  if (translate && !(await ensureConsent())) return;
+  if (state.segs.length && !confirm(`重新生成會覆蓋目前的字幕（可用 Ctrl+Z 復原）${translate ? '，並再次產生翻譯費用' : ''}。確定繼續？`)) return;
   pause();
   setBusy('gen', 0, 'AI 生成中');
   try {
     const pid = await ensureProject();
     const d = await api('POST', `/api/projects/${pid}/generate`, {
       mode: state.mode, src_lang: state.srcLang, tgt_lang: state.tgtLang, tone: state.tone, opts: tOpts(),
-      max_chars: settingsCache.max_chars || 42, translate: true,
+      max_chars: settingsCache.max_chars || 42, translate,
     });
     curJob = d.job;
-    const res = await pollJob(d.job, p => setBusy('gen', p, 'AI 生成中'));
+    const res = await pollJob(d.job, (p, note) => setBusy('gen', p, 'AI 生成中', note));
     if (project.id !== pid) throw new Error('專案已切換，生成結果會在重新開啟該專案時套用');
     applyGenResult(res); pendingAck = d.job; scheduleSave();
   } catch (e) { if (!e.cancelled) toast(e.message, 'warn', 6000); else toast('已取消', 'info'); }
@@ -1229,6 +1390,8 @@ $('#genBtn').onclick = async () => {
 };
 $('#retrBtn').onclick = async () => {
   if (busy || !state.segs.length) return;
+  if (!(await readyToTranslate())) return;
+  if (!confirm(`以目前的原文重新翻譯全部 ${state.segs.length} 句？\n\n會取代現有譯文（包含你手動修改過的，可用 Ctrl+Z 復原），並產生翻譯服務的費用。`)) return;
   setBusy('tr', 0, '翻譯中');
   try {
     const pid = await ensureProject();
@@ -1263,8 +1426,12 @@ function openModal(id) {
   modalReturn = document.activeElement; $(id).classList.add('show');
   requestAnimationFrame(() => { refreshSegs(); const f = $(id).querySelector('input:not([type=hidden]):not([type=color]),textarea,button:not([data-close])'); f && f.focus({ preventScroll: true }); });
 }
-function closeModal(id) { $(id).classList.remove('show'); modalReturn && modalReturn.focus && modalReturn.focus({ preventScroll: true }); modalReturn = null; }
-$$('.modal-bg').forEach(m => { m.addEventListener('pointerdown', e => { m._down = e.target === m; }); m.addEventListener('click', e => { if ((e.target === m && m._down) || e.target.closest('[data-close]')) m.classList.remove('show'); }); });
+function closeModal(id) {
+  const m = typeof id === 'string' ? $(id) : id; if (!m.classList.contains('show')) return;
+  m.classList.remove('show'); modalReturn && modalReturn.focus && modalReturn.focus({ preventScroll: true }); modalReturn = null;
+  if (m._onclose) { const f = m._onclose; m._onclose = null; f(); }
+}
+$$('.modal-bg').forEach(m => { m.addEventListener('pointerdown', e => { m._down = e.target === m; }); m.addEventListener('click', e => { if ((e.target === m && m._down) || e.target.closest('[data-close]')) closeModal(m); }); });
 $('#kbdBtn').onclick = () => openModal('#kbdModal');
 
 // ---- settings
@@ -1278,7 +1445,19 @@ async function loadSettingsUI() {
     setSeg('#devSeg', s.device || 'cuda'); $('#maxChar').value = s.max_chars || 42; fillRange($('#maxChar')); $('#maxCharOut').textContent = (s.max_chars || 42);
   } catch (e) { }
 }
-$('#settingsBtn').onclick = () => { loadSettingsUI(); openModal('#settingsModal'); };
+$('#settingsBtn').onclick = () => { loadSettingsUI(); pollStatus(); openModal('#settingsModal'); };
+$('#unloadBtn').onclick = async () => {
+  try { await api('POST', '/api/models/unload'); toast('已釋放語音模型佔用的記憶體，下次生成字幕時會重新載入'); pollStatus(); }
+  catch (e) { toast(e.message, 'warn'); }
+};
+$('#diagBtn').onclick = async () => {
+  try {
+    const d = await api('GET', '/api/diag');
+    try { await navigator.clipboard.writeText(d.text); }
+    catch (e) { const t = document.createElement('textarea'); t.value = d.text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); }
+    toast('已複製診斷資訊（不含 API Key 與字幕內容），回報問題時可以貼上');
+  } catch (e) { toast(e.message, 'warn'); }
+};
 initSeg('#devSeg');
 $('#maxChar').addEventListener('input', e => { fillRange(e.target); $('#maxCharOut').textContent = e.target.value; });
 $('#testApi').onclick = async () => {
@@ -1309,13 +1488,23 @@ async function pollStatus() {
     const pill = $('#modelPill');
     pill.classList.remove('loading', 'error', 'idle');
     if (s.asr === 'ready') { pill.dataset.tip = `模型已就緒 · ${s.device.toUpperCase()}${s.gpu ? ' · ' + s.gpu : ''}`; next = 30000; }
-    else if (s.asr === 'error') { pill.classList.add('error'); pill.dataset.tip = '模型載入失敗：' + (s.asr_error || '').slice(0, 60); }
+    else if (s.asr === 'error') { pill.classList.add('error'); pill.dataset.tip = s.asr_error || '模型載入失敗'; next = 15000; }
+    else if (s.asr === 'idle') { pill.classList.add('idle'); pill.dataset.tip = '語音模型尚未載入（第一次生成字幕時自動載入）'; next = 15000; }
     else { pill.classList.add('loading'); pill.dataset.tip = '模型載入中…'; }
-    $('#modelTxt').textContent = s.asr === 'ready' ? 'Qwen3-ASR · DeepSeek' : s.asr === 'error' ? '模型載入失敗' : '模型載入中…';
-    $$('[data-mtag]').forEach(t => { t.textContent = s.asr === 'ready' ? '已載入' : s.asr === 'error' ? '失敗' : '載入中'; t.className = 'tag ' + s.asr; });
+    const host = (s.settings || {}).api_host || '';
+    const svc = /deepseek\.com$/.test(host) ? 'DeepSeek' : host || '翻譯服務';
+    $('#modelTxt').textContent = s.asr === 'ready' ? `Qwen3-ASR · ${svc}` : s.asr === 'error' ? '模型載入失敗' : s.asr === 'idle' ? '模型待載入' : '模型載入中…';
+    $$('[data-mtag]').forEach(t => { t.textContent = { ready: '已載入', error: '失敗', idle: '未載入' }[s.asr] || '載入中'; t.className = 'tag ' + s.asr; });
+    $('#asrError').hidden = s.asr !== 'error'; $('#asrError span').textContent = s.asr_error || '';
+    $('#unloadBtn').disabled = s.asr !== 'ready';
+    $('#verTxt').textContent = s.version ? `LumenSubs ${s.version}` : '';
+    const u = s.usage || {};
+    $('#usageTxt').textContent = u.requests ? `本月翻譯用量：${fmtNum(u.requests)} 次請求 · 輸入 ${fmtNum(u.prompt)} tokens（其中快取 ${fmtNum(u.cache_hit)}）· 輸出 ${fmtNum(u.completion)} tokens` : '本月尚未使用翻譯服務';
+    if (!pollStatus.hw && (s.warnings || []).length) { pollStatus.hw = true; s.warnings.forEach((w, i) => setTimeout(() => toast(w, 'warn', 9000), 800 + i * 400)); }
+    if (s.asr === 'error' && pollStatus.lastErr !== s.asr_error) { pollStatus.lastErr = s.asr_error; toast(s.asr_error, 'warn', 10000); }
     $('#gpuInfo').textContent = s.gpu || (s.device === 'cpu' ? 'CPU' : '');
     $('#encInfo').textContent = s.nvenc ? 'NVENC 硬體加速' : 'x264';
-    if (!(s.settings || {}).api_key_set && !pollStatus.warned) { pollStatus.warned = true; toast('尚未設定 DeepSeek API Key，請至「設定」填寫', 'warn', 5000); }
+    if (!(s.settings || {}).api_key_set && !pollStatus.warned) { pollStatus.warned = true; toast('尚未設定翻譯服務的 API Key：目前只能做本機轉錄，要自動翻譯請到「設定」填寫', 'info', 6000); }
   } catch (e) { next = 5000; }
   statusTimer = setTimeout(pollStatus, next);
 }
@@ -1395,15 +1584,6 @@ function updExpHint() {
   updOutPrev();
   $('#expHint').innerHTML = `${ICON.info}<span>${soft ? '軟字幕封裝為 MKV（ASS 樣式軌），影像不重新編碼，速度最快；播放器可開關字幕。已內嵌所用字型；圓角底框與柔和陰影為近似效果。' : '硬字幕以預覽相同的渲染器逐句繪製後燒錄，成品與預覽完全一致。'} 輸出 ${w}×${h}${state.mode === 'audio' ? ` · 背景圖${state.opts.viz ? '＋音訊律動' : ''}` : ''}</span>`;
 }
-function textFor(s, c = expContent) {
-  const T = s.tgt, S = s.src;
-  if (c === 'tgt') return T; if (c === 'src') return S;
-  return style.order === 'tgt-top' ? [T, S].filter(Boolean).join('\n') : [S, T].filter(Boolean).join('\n');
-}
-function assColor(hex, a = 0) { const h = hex.replace('#', ''); return `&H${pad(Math.round(a * 255).toString(16), 2)}${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}`.toUpperCase(); }
-// ASS has no escape for "\" or braces: swap in look-alike full-width characters
-const assEsc = t => String(t).replace(/\\/g, '＼').replace(/\{/g, '｛').replace(/\}/g, '｝');
-function assTime(t) { const cs = Math.round(Math.max(0, t) * 100); return `${Math.floor(cs / 360000)}:${pad(Math.floor(cs / 6000) % 60)}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`; }
 // ASS/VSFilter font size is the cell height (ascent + descent), the canvas uses the em size
 function assFontSize(c) {
   try {
@@ -1415,27 +1595,16 @@ function assFontSize(c) {
 }
 function buildASS(content = expContent, dims) {
   const [W, H] = dims || exportDims();
-  const k = 1080 / Math.min(W, H);
-  const PX = Math.round(W * k), PY = Math.round(H * k);
   const cv = document.createElement('canvas').getContext('2d');
-  const isBox = style.bg === 'box';
-  const st = (n, c) => `Style: ${n},${c.font},${assFontSize(c)},${assColor(c.color)},&H000000FF,${isBox ? assColor(style.boxColor, 1 - style.boxOpacity) : assColor(c.strokeColor)},${style.bg === 'shadow' ? '&H59230C00' : '&H00000000'},${c.weight >= 600 ? -1 : 0},0,0,0,100,100,0,0,${isBox ? 3 : 1},${isBox ? 8 : c.stroke},${style.bg === 'shadow' ? 2 : 0},8,20,20,20,1`;
-  const ev = state.segs.map(s => {
-    const L = SubRender.layout(cv, s, style, PX, PY, content);
-    if (!L) return '';
-    const parts = L.blocks.map(b => `{\\r${b.k === 'tgt' ? 'Tgt' : 'Src'}}` + b.lines.map(l => assEsc(l.t)).join('\\N'));
-    return `Dialogue: 0,${assTime(s.start)},${assTime(s.end)},Tgt,,0,0,0,,{\\an8\\pos(${Math.round(L.cx)},${Math.round(L.y)})}${parts.join('\\N')}`;
-  }).filter(Boolean);
-  return `[Script Info]\nTitle: ${$('#projName').value}\nScriptType: v4.00+\nPlayResX: ${PX}\nPlayResY: ${PY}\nWrapStyle: 2\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n${st('Tgt', style.tgt)}\n${st('Src', style.src)}\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${ev.join('\n')}\n`;
+  return SubExport.ass(state.segs, {
+    content, style, W, H, title: $('#projName').value, fontSize: assFontSize,
+    layout: (s, PX, PY, c) => SubRender.layout(cv, s, style, PX, PY, c),
+  });
 }
-// a blank line or "-->" inside the text would break the cue structure
-const cueText = s => textFor(s).replace(/\r/g, '').replace(/[ \t]*\n[\s]*/g, '\n').replace(/-->/g, '→').trim();
-const vttEsc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function build(fmtK) {
-  const segs = state.segs.filter(s => cueText(s));
-  if (fmtK === 'srt') return segs.map((s, i) => `${i + 1}\n${fmtFull(s.start)} --> ${fmtFull(s.end)}\n${cueText(s)}\n`).join('\n');
-  if (fmtK === 'vtt') return 'WEBVTT\n\n' + segs.map((s, i) => `${i + 1}\n${fmtFull(s.start, '.')} --> ${fmtFull(s.end, '.')}\n${vttEsc(cueText(s))}\n`).join('\n');
-  if (fmtK === 'txt') return segs.map(s => `[${fmtShort(s.start)}] ${textFor(s).replace(/\n/g, '\n        ')}`).join('\n');
+  if (fmtK === 'srt') return SubExport.srt(state.segs, expContent, style.order);
+  if (fmtK === 'vtt') return SubExport.vtt(state.segs, expContent, style.order);
+  if (fmtK === 'txt') return SubExport.txt(state.segs, expContent, style.order);
   return buildASS();
 }
 function updPreview() { const txt = state.segs.length ? build(expFmt).split('\n').slice(0, 14).join('\n') + '\n…' : '（尚無字幕）'; $('#codePrev').textContent = txt; }
@@ -1503,7 +1672,7 @@ $('#dlVideo').onclick = async () => {
     const res = await pollJob(d.job, p => expProgress(0.3 + p * 0.7, p < 0.06 ? '準備編碼…' : '編碼影片中…'));
     $('#expProg').hidden = true;
     showDone(res.path, res.size, true);
-    toast('影片輸出完成', 'spark');
+    res.renamed ? toast(`原檔案正被其他程式使用，影片已另存為「${res.file}」`, 'warn', 8000) : toast('影片輸出完成', 'spark');
   } catch (e) {
     $('#expProg').hidden = true;
     // frames uploaded before encoding started would otherwise stay on disk
@@ -1513,8 +1682,39 @@ $('#dlVideo').onclick = async () => {
   exporting = false; expJob = null; $('#dlVideo').classList.remove('danger'); updExpHint();
 };
 
+// uploads / exports / media processing that kept running after the window was closed or reloaded
+async function resumeBg(pid, bg) {
+  if (bg.media && bg.media.id && !busy) {
+    const kind = bg.media.kind, ringId = kind === 'video' ? '#videoRing' : kind === 'audio' ? '#audioRing' : null;
+    busy = 'upload'; setRing(ringId, 0.5);
+    toast(`「${bg.media.name || '媒體'}」仍在背景處理中…`, 'info', 4000);
+    try {
+      const res = await pollJob(bg.media.id, p => setRing(ringId, 0.5 + p * 0.5));
+      if (project.id === pid) { project.media[kind] = res.media; await setMode(state.mode); applyMediaUI(); toast('背景處理完成，媒體已更新', 'info'); }
+    } catch (e) { if (e.status !== 404 && !e.cancelled) toast(e.message, 'warn', 6000); }
+    setRing(ringId, null); busy = null; updGenButtons();
+  }
+  if (bg.export && bg.export.id && !exporting) {
+    exporting = true; expJob = bg.export.id;
+    $('#dlVideoTxt').textContent = '取消輸出'; $('#dlVideo').classList.add('danger');
+    toast('有一支影片仍在背景輸出，可開啟「匯出」查看進度或取消', 'info', 6000);
+    try {
+      const res = await pollJob(bg.export.id, p => expProgress(0.3 + p * 0.7, '編碼影片中…'));
+      $('#expProg').hidden = true; showDone(res.path, res.size, true);
+      toast(res.renamed ? `影片已另存為「${res.file}」` : '背景的影片輸出已完成', 'spark', 6000);
+    } catch (e) { $('#expProg').hidden = true; if (e.status !== 404 && !e.cancelled) toast(e.message, 'warn', 7000); }
+    exporting = false; expJob = null; $('#dlVideo').classList.remove('danger'); updExpHint();
+  }
+}
+window.addEventListener('beforeunload', e => {
+  // these only live in this window: closing it would throw them away
+  if (uploading || (exporting && !expJob)) { e.preventDefault(); e.returnValue = ''; }
+});
+
 /* ---------------- keyboard ---------------- */
 document.addEventListener('keydown', e => {
+  if (e.isComposing || e.keyCode === 229) return;
+  if (pop.contains(e.target)) return;                     // popup lists handle their own keys
   const typing = e.target.matches('input:not([type=range]),textarea,select,[contenteditable]');
   const onRange = e.target.matches('input[type=range]'), onButton = !!e.target.closest('button,[role=button],[role=switch],a[href]');
   if ((e.ctrlKey || e.metaKey) && !typing) {
@@ -1523,7 +1723,7 @@ document.addEventListener('keydown', e => {
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e') { e.preventDefault(); $('#exportBtn').click(); return; }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow(); return; }
-  if (e.key === 'Escape') { $$('.modal-bg.show').forEach(m => m.classList.remove('show')); closePop(); if (typing) e.target.blur(); return; }
+  if (e.key === 'Escape') { $$('.modal-bg.show').forEach(m => closeModal(m)); closePop(); if (typing) e.target.blur(); return; }
   if (typing || $('.modal-bg.show')) return;
   if (onButton && (e.code === 'Space' || e.key === 'Enter')) return;
   if (onRange && e.key.startsWith('Arrow')) return;
@@ -1541,7 +1741,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 window.addEventListener('pagehide', () => {
   if (!dirty || !project.id) return;
   writeBackup();                        // synchronous, always succeeds within quota
-  const blob = new Blob([JSON.stringify({ name: $('#projName').value, state: serial(), ...(pendingAck ? { ack_job: pendingAck } : {}) })], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ name: $('#projName').value, state: serial(), base_rev: project.rev, ...(pendingAck ? { ack_job: pendingAck } : {}) })], { type: 'application/json' });
   if (blob.size < 60000) navigator.sendBeacon(`/api/projects/${project.id}/save?t=${encodeURIComponent(TOKEN)}`, blob);   // beacons are capped at 64 KB
 });
 
@@ -1558,7 +1758,17 @@ function initA11y() {
     new MutationObserver(upd).observe(sw, { attributes: true, attributeFilter: ['class'] });
     activate(r, () => r.click());
   });
-  $$('.modal-bg').forEach(m => { const box = m.firstElementChild; if (box) { box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); } });
+  $$('.modal-bg').forEach(m => {
+    const box = m.firstElementChild; if (!box) return;
+    box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true');
+    const h = $('h3', box); if (h) { h.id = h.id || m.id + 'Title'; box.setAttribute('aria-labelledby', h.id); }
+  });
+  $$('.swatch').forEach(b => b.setAttribute('aria-label', `顏色 ${b.dataset.c}`));
+  $$('.color-in input').forEach(i => i.setAttribute('aria-label', '自訂顏色'));
+  const fl = $('#followSw').parentElement; fl.tabIndex = 0; fl.setAttribute('role', 'switch');
+  const updF = () => fl.setAttribute('aria-checked', String($('#followSw').classList.contains('on'))); updF();
+  new MutationObserver(updF).observe($('#followSw'), { attributes: true, attributeFilter: ['class'] });
+  activate(fl, () => fl.click());
   // keep Tab inside an open dialog
   document.addEventListener('keydown', e => {
     if (e.key !== 'Tab') return;

@@ -14,6 +14,13 @@
   const NO_START = new Set('、。，．,.!?！？:;：；)）]」』】〉》〕｝}ー〜～…‥ゃゅょっぁぃぅぇぉャュョッァィゥェォヮゎ々゛゜’”%％°℃'.split(''));
   const NO_END = new Set('(（[「『【〈《〔｛{‘“'.split(''));
   const RTL_RE = /[֐-ࣿיִ-﷿ﹰ-﻿]/;
+  // strong left-to-right letters (Latin, Greek, Cyrillic, Devanagari, Thai, CJK, Hangul…)
+  const LTR_RE = /[A-Za-zÀ-ɏͰ-ϿЀ-ӿऀ-ॿ฀-๿぀-ヿ㐀-鿿가-힯]/;
+  /* base direction from the first strong character, like dir="auto" in the editor */
+  function isRTL(t) {
+    for (const ch of t) { if (RTL_RE.test(ch)) return true; if (LTR_RE.test(ch)) return false; }
+    return false;
+  }
   const CJK_RE = /[぀-ヿ㐀-鿿豈-﫿가-힯]/;
 
   let segCache = null;
@@ -47,7 +54,12 @@
     return out;
   }
 
+  // text widths per font; web fonts arrive later than the first frame, so the
+  // cache is cleared whenever the browser finishes loading fonts
   const mCache = new Map();
+  if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) {
+    document.fonts.addEventListener('loadingdone', () => mCache.clear());
+  }
   function measure(ctx, font, s) {
     const k = font + '\u0001' + s;
     let v = mCache.get(k);
@@ -59,21 +71,21 @@
     const lines = [];
     let cur = '', curW = 0;
     const push = () => { const t = cur.replace(/\s+$/, ''); if (t) lines.push(t); cur = ''; curW = 0; };
+    // a unit wider than a whole line (URL, long compound word): hard-break by characters
+    const hardBreak = u => {
+      let piece = '';
+      for (const ch of u) {
+        if (piece && measure(ctx, font, piece + ch) > maxW) { lines.push(piece); piece = ''; }
+        piece += ch;
+      }
+      cur = piece; curW = measure(ctx, font, piece);
+    };
     for (let u of us) {
       if (!cur && /^\s+$/.test(u)) continue;
       const w = measure(ctx, font, u);
-      if (curW + w <= maxW || !cur) {
-        if (!cur && w > maxW) {                       // single unit wider than the line: hard-break by chars
-          let piece = '';
-          for (const ch of u) {
-            if (piece && measure(ctx, font, piece + ch) > maxW) { lines.push(piece); piece = ''; }
-            piece += ch;
-          }
-          cur = piece; curW = measure(ctx, font, piece);
-          continue;
-        }
-        cur += u; curW += w;
-      } else { push(); if (/^\s+$/.test(u)) continue; cur = u; curW = w; }
+      if (curW + w <= maxW) { cur += u; curW += w; continue; }
+      if (cur) { push(); if (/^\s+$/.test(u)) continue; }
+      if (w > maxW) hardBreak(u); else { cur = u; curW = w; }
     }
     push();
     return lines;
@@ -121,7 +133,7 @@
     const blocks = blocksFor(cue, style, display).map(b => {
       const c = style[b.k];
       const font = fontOf(c, sc);
-      const lines = wrap(ctx, font, b.text, Math.max(40, maxW), style.balance !== false).map(t => ({ t, w: measure(ctx, font, t), rtl: RTL_RE.test(t) }));
+      const lines = wrap(ctx, font, b.text, Math.max(40, maxW), style.balance !== false).map(t => ({ t, w: measure(ctx, font, t), rtl: isRTL(t) }));
       const lh = c.size * sc * 1.32;
       return { k: b.k, c, font, lines, lh, sc };
     }).filter(b => b.lines.length);
@@ -232,5 +244,6 @@
     ctx.restore();
   }
 
-  global.SubRender = { draw, layout, ensureFonts, drawBackground, stack, hexA, blocksFor };
-})(window);
+  const api = { draw, layout, wrap, ensureFonts, drawBackground, stack, hexA, blocksFor, isRTL };
+  if (typeof module === 'object' && module.exports) module.exports = api; else global.SubRender = api;
+})(typeof window !== 'undefined' ? window : globalThis);

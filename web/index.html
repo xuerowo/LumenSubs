@@ -106,9 +106,10 @@
             <button class="chip" data-v="literal">貼近原文</button>
           </div>
         </div>
+        <div class="toggle-row" data-toggle="translate" title="關閉時只在本機轉錄，逐字稿不會離開這台電腦">自動翻譯（逐字稿會傳送到翻譯服務）<span class="sw on"></span></div>
         <div class="toggle-row" data-toggle="keepNames">保留專有名詞原文 <span class="sw on"></span></div>
         <div class="toggle-row" data-toggle="context">結合全文脈絡翻譯 <span class="sw on"></span></div>
-        <div class="toggle-row" data-toggle="proofread">AI 校正辨識錯字 <span class="sw on"></span></div>
+        <div class="toggle-row" data-toggle="proofread" title="被修正的句子會標示「AI 校正」，點擊即可還原">AI 校正辨識錯字 <span class="sw on"></span></div>
         <div class="toggle-row" data-toggle="balance">長句平衡斷行 <span class="sw on"></span></div>
       </div>
     </div>
@@ -358,22 +359,30 @@
         <div class="sec-title">語音轉錄（本機）<span class="aux" id="gpuInfo"></span></div>
         <div class="stack">
           <div class="model-card"><div class="mi"><svg class="svg" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg></div><div><b>Qwen3-ASR-1.7B</b><small>語音辨識 · 30 種語言 · 自動偵測</small></div><span class="tag" data-mtag></span></div>
-          <div class="model-card"><div class="mi"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div><b>Qwen3-ForcedAligner-0.6B</b><small>強制對齊 · 字級時間戳</small></div><span class="tag" data-mtag></span></div>
+          <div class="model-card"><div class="mi"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div><div><b>Qwen3-ForcedAligner-0.6B</b><small>字級時間對齊 · 中英日韓粵法德義葡俄西 11 種語言（其他語言的時間為估算）</small></div><span class="tag" data-mtag></span></div>
+          <div class="hint warn-hint" id="asrError" hidden><svg class="svg" viewBox="0 0 24 24"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h16.9a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg><span></span></div>
           <div class="row2">
             <div class="field"><div class="lbl">運算裝置</div><div class="seg sm" id="devSeg"><button data-v="cuda" class="on">CUDA</button><button data-v="cpu">CPU</button></div></div>
             <div class="field"><div class="lbl">每句最長 <span class="val" id="maxCharOut">42</span></div><input type="range" id="maxChar" min="20" max="84" value="42"></div>
           </div>
-          <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>每句長度以半形字元計算（中日韓文字每字計 2），影響自動斷句。</div>
+          <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>每句長度以半形字元計算（中日韓文字每字計 2），影響自動斷句。語音模型約佔 6.5 GB 顯示卡記憶體（CPU 模式約 13 GB 記憶體）。</div>
+          <div class="row-btns"><button class="btn ghost" id="unloadBtn">釋放模型記憶體</button></div>
         </div>
       </div>
       <div class="m-sec">
-        <div class="sec-title">翻譯（DeepSeek API）</div>
+        <div class="sec-title">翻譯（DeepSeek 或其他 OpenAI 相容服務）</div>
         <div class="field"><div class="lbl">API Key <span id="keyState" style="font-weight:500;color:var(--ink-3)"></span></div><input class="inp mono" type="password" placeholder="sk-••••••••••••••••" id="apiKey" autocomplete="off"></div>
         <div class="row2">
           <div class="field"><div class="lbl">Base URL</div><input class="inp mono" id="baseUrl" value="https://api.deepseek.com"></div>
           <div class="field"><div class="lbl">模型</div><input class="inp mono" id="modelName" value="deepseek-flash"></div>
         </div>
         <div class="field"><div class="lbl">術語表 <span style="font-weight:500;color:var(--ink-3)">每行一組：原文 = 譯文（亦用於提升辨識）</span></div><textarea class="inp mono" rows="3" id="glossary" placeholder="Qwen = Qwen&#10;LumenSubs = LumenSubs"></textarea></div>
+        <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span id="usageTxt"></span></div>
+      </div>
+      <div class="m-sec">
+        <div class="sec-title">關於<span class="aux" id="verTxt"></span></div>
+        <div class="row-btns"><button class="btn ghost" id="diagBtn">複製診斷資訊</button></div>
+        <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>回報問題時請附上診斷資訊與 workspace/logs 內的紀錄檔（不含 API Key 與字幕內容）。</div>
       </div>
     </div>
     <div class="m-foot">
@@ -395,13 +404,46 @@
       <div class="m-sec">
         <div class="sec-title">字幕內容匯入為</div>
         <div class="seg" id="impMode"><button data-v="src" class="on">原文</button><button data-v="tgt">譯文</button><button data-v="tgt-top">雙語 · 上譯下原</button><button data-v="src-top">雙語 · 上原下譯</button></div>
+        <div class="field enc-row"><label class="lbl" for="impEnc">文字編碼</label>
+          <select class="inp" id="impEnc">
+            <option value="">自動偵測</option><option value="utf-8">UTF-8</option><option value="big5">Big5（繁體中文）</option>
+            <option value="gb18030">GBK / GB18030（簡體中文）</option><option value="shift_jis">Shift_JIS（日文）</option>
+            <option value="euc-kr">EUC-KR（韓文）</option><option value="windows-1251">Windows-1251（俄文等）</option>
+            <option value="windows-1252">Windows-1252（西歐語言）</option><option value="utf-16le">UTF-16</option>
+          </select>
+          <small>預覽出現亂碼時，請改選正確的編碼</small>
+        </div>
         <div class="imp-prev" id="impPrev"></div>
+        <div class="hint warn-hint" id="impNotes" hidden></div>
         <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>只匯入原文時，可接著按「重新翻譯」產生譯文。<b id="impWarn" hidden>匯入會取代目前的字幕（可用 Ctrl+Z 復原）。</b></span></div>
       </div>
     </div>
     <div class="m-foot">
       <button class="btn ghost" data-close>取消</button>
       <button class="btn primary" id="impOk"><span>匯入</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TRANSLATION CONSENT ============ -->
+<div class="modal-bg" id="consentModal">
+  <div class="modal panel" style="width:520px">
+    <div class="m-head">
+      <div class="ic"><svg class="svg" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+      <div><h3>翻譯前請確認</h3><p>逐字稿會傳送到外部的翻譯服務</p></div>
+      <button class="icon-btn" data-close><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="m-body">
+      <div class="m-sec consent">
+        <p>語音轉錄在這台電腦上完成，音訊不會上傳。<b>翻譯時</b>，以下內容會傳送到 <b id="consentHost">api.deepseek.com</b>：</p>
+        <ul><li>完整的逐字稿（每個翻譯批次都附上全文作為上下文）</li><li>你設定的術語表，以及 AI 產生的內容摘要</li><li>單句重新翻譯時，前後幾句目前的譯文（包含你編輯過的）</li></ul>
+        <p id="consentDeepseek">DeepSeek 為中國公司；依其隱私政策，傳送的資料會存放在中國境內的伺服器，並依其條款保存與使用。公司會議、客戶訪談、未公開的影片等內容，請先確認你的公司或客戶是否允許傳送到境外服務。</p>
+        <p>不想傳送時，可關閉左側「自動翻譯」，只在本機轉錄。也請確認你有權處理這段影片或音訊的內容。</p>
+      </div>
+    </div>
+    <div class="m-foot">
+      <button class="btn ghost" id="consentNo">取消</button>
+      <button class="btn primary" id="consentOk"><span>我了解，繼續翻譯</span></button>
     </div>
   </div>
 </div>
@@ -438,6 +480,7 @@
 <div class="toasts" id="toasts"></div>
 <script src="/web/render.js"></script>
 <script src="/web/subparse.js"></script>
+<script src="/web/subexport.js"></script>
 <script src="/web/app.js"></script>
 </body>
 </html>
