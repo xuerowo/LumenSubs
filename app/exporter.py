@@ -8,28 +8,49 @@ Soft subtitles: an ASS track muxed into MKV.
 Audio mode: background still (rendered by the browser, incl. crop + veil)
 + optional audio-reactive bars streamed from numpy + subtitles.
 """
+import logging
 import os
 import re
 import subprocess
-import threading
 from pathlib import Path
 
 import numpy as np
 
-from .media import FFMPEG, NO_WINDOW, nvenc_ok
+from .config import replace_retry
+from .media import FFMPEG, SAFE_INPUT, SDR_TAGS, _tail, run_process, tonemap_filter, use_nvenc
 from .viz import CENTER_Y, VIZ_FPS, MaskRenderer
+
+log = logging.getLogger("lumen.export")
 
 CQ = {"h": 19, "m": 23, "l": 29}
 CRF = {"h": 18, "m": 21, "l": 26}
 ABR = {"h": "256k", "m": "192k", "l": "128k"}
+# subtitle codecs that can be copied from the source into an MKV unchanged
+MKV_SUB_COPY = {"ass", "ssa", "subrip", "srt", "hdmv_pgs_subtitle", "dvd_subtitle", "webvtt"}
 
 
-def _venc(q: str, still: bool = False):
-    if nvenc_ok():
+def _venc(q: str, still: bool = False, nvenc: bool = True):
+    if nvenc:
         return ["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq", "-rc", "vbr", "-cq", str(CQ.get(q, 23)),
                 "-b:v", "0", "-profile:v", "high", "-pix_fmt", "yuv420p"]
     return ["-c:v", "libx264", "-preset", "medium", "-crf", str(CRF.get(q, 21)), "-pix_fmt", "yuv420p"] + \
         (["-tune", "stillimage"] if still else [])
+
+
+def _encode(job, build, W: int, H: int, dur: float, feeder_factory=None, log_path: Path = None):
+    """Encode with NVENC when it can handle the frame size; if the hardware
+    encoder fails (too large, driver trouble, another app holding it), fall
+    back to libx264 once instead of failing the whole export."""
+    tries = [True, False] if use_nvenc(W, H) else [False]
+    for k, nv in enumerate(tries):
+        try:
+            run_ffmpeg(job, build(nv), dur, feeder=feeder_factory() if feeder_factory else None, log_path=log_path)
+            return
+        except RuntimeError as e:
+            if k + 1 == len(tries) or job.cancelled():
+                raise
+            log.warning("NVENC export failed, retrying with libx264: %s", str(e)[:300])
+            job.progress = 0.05
 
 
 def safe_name(s: str) -> str:
@@ -85,39 +106,28 @@ def _grad_png(path: Path, w: int, h: int):
 def run_ffmpeg(job, args, duration: float, feeder=None, log_path: Path = None):
     cmd = [FFMPEG, "-y", "-hide_banner", "-nostats", "-progress", "pipe:1", *args]
     errf = open(log_path, "wb") if log_path else subprocess.DEVNULL
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if feeder else subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=errf, creationflags=NO_WINDOW)
-    th = None
-    if feeder:
-        th = threading.Thread(target=feeder, args=(proc,), daemon=True)
-        th.start()
+
+    def on_line(line: str):
+        if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+            try:
+                us = int(line.split("=")[1])
+                job.progress = max(job.progress, min(0.99, 0.05 + 0.94 * us / 1e6 / max(0.1, duration)))
+            except ValueError:
+                pass
+    rc = None
     try:
-        for raw in proc.stdout:
-            line = raw.decode("ascii", "ignore").strip()
-            if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
-                try:
-                    us = int(line.split("=")[1])
-                    job.progress = max(job.progress, min(0.99, 0.05 + 0.94 * us / 1e6 / max(0.1, duration)))
-                except ValueError:
-                    pass
-            if job.cancelled():
-                proc.kill()
-                break
-        proc.wait()
+        rc = run_process(cmd, on_line, job.cancelled, stderr=errf, feeder=feeder)
     finally:
         if log_path:
             errf.close()
-    if job.cancelled() or proc.returncode != 0:
-        try:
-            Path(args[-1]).unlink(missing_ok=True)
-        except OSError:
-            pass
-    if job.cancelled():
-        from .jobs import Cancelled
-        raise Cancelled()
-    if proc.returncode != 0:
-        tail = log_path.read_text("utf-8", "ignore")[-800:] if log_path else ""
-        raise RuntimeError("FFmpeg 輸出失敗：" + tail)
+        if rc != 0:
+            try:
+                Path(args[-1]).unlink(missing_ok=True)
+            except OSError:
+                pass
+    if rc != 0:
+        tail = log_path.read_text("utf-8", "ignore") if log_path else ""
+        raise RuntimeError("FFmpeg 輸出失敗：" + _tail(tail, 400, 600))
 
 
 def _attach(files) -> list:
@@ -131,14 +141,40 @@ def _attach(files) -> list:
 
 
 def _finish(tmp: Path, final: Path) -> dict:
-    os.replace(tmp, final)
-    return {"file": final.name, "path": str(final), "size": final.stat().st_size}
+    """Give the finished file its real name. If the target is locked (e.g. a
+    player has the previous version open), keep the result under a new name
+    instead of throwing away a long encode."""
+    renamed = False
+    try:
+        replace_retry(tmp, final, tries=15)
+    except OSError:
+        alt = unique(final.with_name(f"{final.stem} (新){final.suffix}"))
+        os.replace(tmp, alt)
+        final, renamed = alt, True
+    return {"file": final.name, "path": str(final), "size": final.stat().st_size, "renamed": renamed}
+
+
+def check_writable(final: Path):
+    """Fail before encoding (not after) when the target cannot be written."""
+    if final.exists():
+        try:
+            with open(final, "r+b"):
+                pass
+        except PermissionError:
+            raise PermissionError(f"「{final.name}」正被其他程式使用（例如播放器），請先關閉它，或改用其他檔名")
+    probe = final.with_name(f".{final.stem}.writetest")
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as e:
+        raise PermissionError(f"無法寫入資料夾「{final.parent}」：{e.strerror or e}")
 
 
 def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) -> dict:
     """meta: mode, burn, width, height, quality, duration, cues[{start,end,frame}],
-    ass, viz, name.  media: {'video': Path} or {'audio': Path, 'viz': Path|None},
-    plus optional 'fonts': [Path] to embed in soft-subtitle MKVs."""
+    ass, viz, name.  media: {'video': Path, 'info': probe dict} or
+    {'audio': Path, 'viz': Path|None}, plus optional 'fonts': [Path] to embed
+    in soft-subtitle MKVs."""
     W, H = int(meta["width"]) // 2 * 2, int(meta["height"]) // 2 * 2
     q = meta.get("quality", "m")
     dur = float(meta["duration"])
@@ -152,6 +188,7 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
     else:
         out_dir.mkdir(parents=True, exist_ok=True)
         final = unique(out_dir / (safe_name(meta.get("name")) + ext))
+    check_writable(final)
     # encode into a temp file next to the target; only a finished file gets the real name
     out = final.with_name(f".{final.stem}.part{ext}")
     log_path = frames_dir / "ffmpeg.log"
@@ -160,29 +197,44 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
         ass_path = frames_dir / "subs.ass"
         ass_path.write_text(meta.get("ass", ""), encoding="utf-8-sig")
     job.set(0.03)
+    lang_tag = f"language={meta.get('sub_lang', 'und')}"
 
     if meta["mode"] == "video":
         src = media["video"]
+        info = media.get("info") or {}
         if soft:
-            args = ["-i", str(src), "-i", str(ass_path), "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
-                    "-c:v", "copy", "-c:a", "copy", "-c:s", "ass",
-                    "-metadata:s:s:0", f"language={meta.get('sub_lang', 'und')}", "-disposition:s:0", "default",
-                    *_attach(media.get("fonts")), str(out)]
-        else:
-            lst = write_concat(frames_dir, meta["cues"], dur)
-            fc = (f"[0:v]scale={W}:{H}:flags=lanczos,setsar=1[b];[1:v]format=rgba[s];"
-                  f"[b][s]overlay=0:0:format=auto:eof_action=repeat,format=yuv420p[v]")
-            args = ["-i", str(src), "-f", "concat", "-i", str(lst), "-filter_complex", fc,
-                    "-map", "[v]", "-map", "0:a:0?", *_venc(q), "-c:a", "aac", "-b:a", ABR.get(q, "192k"),
-                    "-movflags", "+faststart", "-t", f"{dur:.3f}", str(out)]
-        run_ffmpeg(job, args, dur, log_path=log_path)
+            # our track first (s:0, default); copyable subtitle tracks of the source follow
+            keep_subs = [i for i, c in enumerate(info.get("subs") or []) if c in MKV_SUB_COPY]
+            args = [*SAFE_INPUT, "-i", str(src), "-i", str(ass_path), "-map", "0:v:0", "-map", "0:a?", "-map", "1:0"]
+            for i in keep_subs:
+                args += ["-map", f"0:s:{i}"]
+            args += ["-c:v", "copy", "-c:a", "copy", "-c:s", "copy", "-c:s:0", "ass",
+                     "-metadata:s:s:0", lang_tag, "-disposition:s:0", "default"]
+            for k in range(1, len(keep_subs) + 1):
+                args += [f"-disposition:s:{k}", "0"]
+            args += [*_attach(media.get("fonts")), str(out)]
+            run_ffmpeg(job, args, dur, log_path=log_path)
+            return _finish(out, final)
+        lst = write_concat(frames_dir, meta["cues"], dur)
+        # HDR sources are tone-mapped to SDR first: the subtitle frames are SDR
+        # colours, and the result then matches the (SDR) preview
+        tm = tonemap_filter() if info.get("hdr") else None
+        pre = f"{tm}," if tm else ""
+        fc = (f"[0:v]{pre}scale={W}:{H}:flags=lanczos,setsar=1[b];[1:v]format=rgba[s];"
+              f"[b][s]overlay=0:0:format=auto:eof_action=repeat,format=yuv420p[v]")
+
+        def build(nv):
+            return [*SAFE_INPUT, "-i", str(src), "-f", "concat", "-i", str(lst), "-filter_complex", fc,
+                    "-map", "[v]", "-map", "0:a?", *_venc(q, nvenc=nv), *(SDR_TAGS if tm else []),
+                    "-c:a", "aac", "-b:a", ABR.get(q, "192k"), "-movflags", "+faststart", "-t", f"{dur:.3f}", str(out)]
+        _encode(job, build, W, H, dur, log_path=log_path)
         return _finish(out, final)
 
     # ---------------- audio mode
     audio = media["audio"]
     fps = VIZ_FPS
     # decode the still once and loop it in memory (-loop 1 would re-decode every frame)
-    inputs = ["-i", str(frames_dir / "bg.png"), "-i", str(audio)]
+    inputs = ["-i", str(frames_dir / "bg.png"), *SAFE_INPUT, "-i", str(audio)]
     fc = [f"[0:v]scale={W}:{H},setsar=1,format=rgba,loop=loop=-1:size=1:start=0,setpts=N/{fps}/TB[bg0]"]
     last = "bg0"
     n_in = 2
@@ -222,6 +274,7 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
                 proc.stdin.close()
             except (BrokenPipeError, OSError, ValueError):
                 pass
+    sub_in = None
     if not soft:
         lst = write_concat(frames_dir, meta["cues"], dur)
         inputs += ["-f", "concat", "-i", str(lst)]
@@ -233,14 +286,17 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
         sub_in = n_in
         n_in += 1
     fc.append(f"[{last}]format=yuv420p[v]")
-    args = [*inputs, "-filter_complex", ";".join(fc), "-map", "[v]", "-map", "1:a:0"]
-    if soft:
-        args += ["-map", f"{sub_in}:0", "-c:s", "ass", "-metadata:s:s:0", f"language={meta.get('sub_lang', 'und')}",
-                 "-disposition:s:0", "default", *_attach(media.get("fonts"))]
-    args += [*_venc(q, still=bands is None), "-r", str(fps), "-c:a", "aac", "-b:a", ABR.get(q, "192k"),
-             "-t", f"{dur:.3f}"]
-    if not soft:
-        args += ["-movflags", "+faststart"]
-    args.append(str(out))
-    run_ffmpeg(job, args, dur, feeder=feeder, log_path=log_path)
+
+    def build(nv):
+        args = [*inputs, "-filter_complex", ";".join(fc), "-map", "[v]", "-map", "1:a:0"]
+        if soft:
+            args += ["-map", f"{sub_in}:0", "-c:s", "ass", "-metadata:s:s:0", lang_tag,
+                     "-disposition:s:0", "default", *_attach(media.get("fonts"))]
+        args += [*_venc(q, still=bands is None, nvenc=nv), "-r", str(fps), "-c:a", "aac", "-b:a", ABR.get(q, "192k"),
+                 "-t", f"{dur:.3f}"]
+        if not soft:
+            args += ["-movflags", "+faststart"]
+        args.append(str(out))
+        return args
+    _encode(job, build, W, H, dur, feeder_factory=(lambda: feeder) if feeder else None, log_path=log_path)
     return _finish(out, final)
