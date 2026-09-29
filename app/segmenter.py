@@ -1,7 +1,8 @@
 """Turn word-level timestamps into readable subtitle cues.
 
 Rules (in priority order):
-  * hard breaks at sentence-final punctuation, ASR chunk borders and long pauses
+  * hard breaks at sentence-final punctuation (incl. "." outside abbreviations)
+    and long pauses
   * long sentences are split recursively at the best point, scored by
     punctuation, pause length, balance and linguistic "glue" (never start a
     line with a particle / end one on an article)
@@ -16,6 +17,10 @@ from .asr import is_cjk, is_kept_char
 
 STRONG = set("。！？!?…‼⁉")
 WEAK = set("、，,;；:：—–")
+PERIODS = set(".．")
+# a "." after these does not end a sentence
+ABBREV = {"mr", "mrs", "ms", "dr", "prof", "sr", "sra", "jr", "st", "mt", "vs", "etc", "e.g", "i.e", "cf", "no",
+          "vol", "fig", "inc", "ltd", "co", "corp", "dept", "approx", "u.s", "u.k", "a.m", "p.m", "hr", "fr", "hrn"}
 CLOSERS = set("」』”’\")）】》〉")
 EN_GLUE = {"a", "an", "the", "of", "to", "in", "on", "at", "for", "with", "and", "or", "but", "my", "your",
            "his", "her", "their", "our", "its", "this", "that", "is", "are", "was", "were", "be", "i", "we",
@@ -58,6 +63,26 @@ def _tail(text: str) -> str:
     return t[-1:] if t else ""
 
 
+def ends_sentence(text: str) -> bool:
+    """Sentence-final punctuation; a period counts unless it closes an
+    abbreviation ("Mr.", "e.g.") or an initial ("J.")."""
+    tail = _tail(text)
+    if tail in STRONG:
+        return True
+    if tail not in PERIODS:
+        return False
+    t = text.rstrip()
+    while t and t[-1] in CLOSERS:
+        t = t[:-1]
+    if t.endswith(("..", "．．")):
+        return True
+    m = re.search(r"([^\W\d_]|[.'])+\.$", t)
+    word = m.group(0)[:-1].lower() if m else ""
+    if word in ABBREV or (len(word) == 1 and word.isalpha()):
+        return False
+    return True
+
+
 def _clean(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
@@ -69,11 +94,11 @@ def segment(words: List[dict], max_chars: int = 42, duration: float = None) -> L
     # ---- 1. sentences
     sents, cur = [], []
     for i, w in enumerate(words):
-        if cur and (w.get("chunk_start") or w["s"] - cur[-1]["e"] > 1.2):
+        if cur and w["s"] - cur[-1]["e"] > 1.2:
             sents.append(cur)
             cur = []
         cur.append(w)
-        if _tail(w["text"]) in STRONG:
+        if ends_sentence(w["text"]):
             sents.append(cur)
             cur = []
     if cur:
@@ -138,7 +163,7 @@ def _split(ws: List[dict], limit: int) -> List[List[dict]]:
         gap = max(0.0, nxt["s"] - prev["e"])
         tail = _tail(prev["text"])
         score = -abs(left - right) / tot * 3.0
-        if tail in STRONG:
+        if ends_sentence(prev["text"]):
             score += 4
         elif tail in WEAK:
             score += 2.2
@@ -168,7 +193,7 @@ def _merge_small(cues: List[List[dict]], limit: int) -> List[List[dict]]:
             n = cues[i + 1]
             gap = n[0]["s"] - c[-1]["e"]
             nw = width("".join(w["text"] for w in n))
-            if gap < 0.3 and cw + nw <= limit and n[-1]["e"] - c[0]["s"] <= MAX_DUR and not n[0].get("chunk_start"):
+            if gap < 0.3 and cw + nw <= limit and n[-1]["e"] - c[0]["s"] <= MAX_DUR:
                 cues[i + 1] = c + n
                 i += 1
                 continue
@@ -176,7 +201,7 @@ def _merge_small(cues: List[List[dict]], limit: int) -> List[List[dict]]:
             p = out[-1]
             gap = c[0]["s"] - p[-1]["e"]
             pw = width("".join(w["text"] for w in p))
-            if gap < 0.3 and cw + pw <= limit and c[-1]["e"] - p[0]["s"] <= MAX_DUR and not c[0].get("chunk_start"):
+            if gap < 0.3 and cw + pw <= limit and c[-1]["e"] - p[0]["s"] <= MAX_DUR:
                 out[-1] = p + c
                 i += 1
                 continue
@@ -186,8 +211,12 @@ def _merge_small(cues: List[List[dict]], limit: int) -> List[List[dict]]:
 
 
 def polish_timing(cues: List[dict], duration: float = None, linger: float = 0.3, min_dur: float = 0.9, gap: float = 0.06):
+    """Add a little linger and a minimum on-screen time without overlaps.
+    Guarantees: start < end, starts non-decreasing, no cue overlaps the next."""
     n = len(cues)
-    for i, c in enumerate(cues):
+    if not n:
+        return
+    for c in cues:
         c["start"] = max(0.0, c["start"] - 0.05)
     for i, c in enumerate(cues):
         nxt = cues[i + 1]["start"] if i + 1 < n else (duration or c["end"] + 5)
@@ -195,8 +224,20 @@ def polish_timing(cues: List[dict], duration: float = None, linger: float = 0.3,
         want = max(c["end"] + linger, c["start"] + min_dur)
         c["end"] = max(c["end"], min(want, nxt - gap))
         if c["end"] - c["start"] < min_dur:
-            c["start"] = max(prv + gap, min(c["start"], c["end"] - min_dur), c["start"] - 0.3)
-        if i + 1 < n and c["end"] > cues[i + 1]["start"]:
-            c["end"] = cues[i + 1]["start"]
-        c["start"] = round(c["start"], 3)
-        c["end"] = round(max(c["end"], c["start"] + 0.1), 3)
+            # still too short: start earlier, into the pause before it (never later)
+            c["start"] = min(c["start"], max(prv + gap, c["end"] - min_dur, c["start"] - 0.3))
+    # final pass: resolve anything the local adjustments could not
+    prev_end = 0.0
+    for i, c in enumerate(cues):
+        s = round(max(c["start"], prev_end), 3)
+        e = round(max(c["end"], s + 0.1), 3)
+        if i + 1 < n:
+            nxt = cues[i + 1]
+            if nxt["start"] < e:
+                if nxt["start"] >= s + 0.1:
+                    e = round(nxt["start"], 3)          # trim this cue
+                else:
+                    nxt["start"] = e                   # no room: push the next one
+                    nxt["end"] = max(nxt["end"], e + 0.1)
+        c["start"], c["end"] = s, e
+        prev_end = e

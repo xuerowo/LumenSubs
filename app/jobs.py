@@ -4,7 +4,7 @@ import threading
 import time
 import traceback
 import uuid
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 log = logging.getLogger("lumen.jobs")
 
@@ -42,11 +42,22 @@ class Job:
 
 
 JOBS: Dict[str, Job] = {}
+_lock = threading.Lock()
+
+
+def get(jid: str) -> Optional[Job]:
+    with _lock:
+        return JOBS.get(jid)
 
 
 def start(kind: str, fn: Callable[[Job], object], project: str = "") -> Job:
     job = Job(kind, project)
-    JOBS[job.id] = job
+    now = time.time()
+    with _lock:
+        # prune finished jobs older than an hour
+        for k in [k for k, j in JOBS.items() if j.status != "running" and now - j.created > 3600]:
+            del JOBS[k]
+        JOBS[job.id] = job
 
     def runner():
         try:
@@ -59,8 +70,4 @@ def start(kind: str, fn: Callable[[Job], object], project: str = "") -> Job:
             log.error("job %s (%s) failed:\n%s", job.id, kind, traceback.format_exc())
             job.status, job.error = ("cancelled", "") if job.cancelled() else ("error", str(e) or e.__class__.__name__)
     threading.Thread(target=runner, daemon=True, name=f"job-{kind}").start()
-    # prune old jobs
-    now = time.time()
-    for k in [k for k, j in JOBS.items() if j.status != "running" and now - j.created > 3600]:
-        JOBS.pop(k, None)
     return job

@@ -1,19 +1,22 @@
+# Versions are bounded to the major releases LumenSubs is tested with, so a
+# reinstall cannot silently pull in breaking changes.
+
 # Core
-fastapi>=0.110
-uvicorn>=0.29
-python-multipart>=0.0.9
-openai>=1.40
-numpy
-pillow
-onnxruntime            # Silero VAD
+fastapi>=0.115,<1
+uvicorn>=0.29,<1
+python-multipart>=0.0.9,<0.1
+openai>=1.40,<4
+numpy>=1.26,<3
+pillow>=10,<13
+onnxruntime>=1.17,<2   # Silero VAD
 opencc                 # zh-TW / zh-CN script safety net (optional)
 
 # Speech recognition (Qwen3-ASR-1.7B + Qwen3-ForcedAligner-0.6B)
-qwen-asr>=0.0.6
+qwen-asr==0.0.6        # app/asr.py patches its generate(); re-test before upgrading
 torch                  # start.bat installs the CUDA build matching your GPU automatically
-transformers>=4.57
-accelerate
-soundfile
-librosa
+transformers>=4.57,<5
+accelerate>=1.0,<2
+soundfile>=0.12,<1
+librosa>=0.10,<1
 
-# External tools: FFmpeg (with libass) must be on PATH.
+# External tool: FFmpeg (and ffprobe) must be on PATH — start.bat can install it.

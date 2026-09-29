@@ -5,6 +5,7 @@
 - **影片翻譯**：影片 → 轉錄 → 翻譯 → 雙語字幕 → 燒錄硬字幕（MP4）或內封軟字幕（MKV）
 - **音訊製片**：音訊 + 背景圖 → 帶字幕（及音訊律動動畫）的影片
 - 字幕檔匯出：SRT / VTT / ASS（保留樣式）/ TXT，雙語、僅譯文或僅原文
+- **匯入既有字幕**（SRT / VTT / ASS / SSA，自動辨識編碼與雙語排列），可直接校對、重新翻譯或燒錄
 - 可自選輸出資料夾（系統原生對話框，會記住上次位置）與檔案名稱；同名檔案會先詢問是否覆蓋
 - 原文／譯文對照編輯、時間碼微調、時間軸拖曳、分割／合併、單句重新翻譯、整體偏移
 - 字幕樣式（字型、字級、字重、顏色、描邊、陰影、圓角底框）與位置可調，可直接在畫面上拖曳
@@ -30,12 +31,20 @@
 
 | 參數 | 用途 |
 |---|---|
-| `start.bat --reinstall` | 重新安裝所有套件（例如更新顯示卡驅動後） |
-| `start.bat --cpu` | 強制使用 CPU 版 PyTorch |
-| `start.bat --no-browser` | 只啟動伺服器，不開視窗 |
+| `start.bat --reinstall` | 重新偵測顯示卡並重裝 PyTorch、更新其餘套件（例如更新顯示卡驅動後） |
+| `start.bat --cpu` | 改用 CPU 版 PyTorch（會記住，之後以 `--reinstall` 改回 GPU） |
+| `start.bat --no-browser` | 只啟動伺服器，不開視窗（主控台會印出含存取金鑰的網址） |
 
 無法連線 huggingface.co 時，可先設定環境變數 `HF_ENDPOINT` 使用鏡像站再執行。
 手動安裝：`pip install -r requirements.txt`（PyTorch 請依 [pytorch.org](https://pytorch.org) 安裝 CUDA 版），再執行 `python run.py`。
+
+## 隱私與安全
+
+- **轉錄在本機完成**，音訊不會上傳。
+- **翻譯會把逐字稿送到 DeepSeek**（或你在設定中指定的 API 位址）：每個翻譯批次都附上完整逐字稿作為上下文。內容敏感時，可只轉錄、不翻譯。
+- 字型由本機伺服器提供：第一次用到時從 Google Fonts 下載並快取到 `workspace/fonts/`（安裝時會先下載介面與預設字幕字型，約 22 MB），之後可離線使用，瀏覽器不會連到外部網站。無法連線時，尚未下載的字型改用系統字型。
+- 本機伺服器只接受本機連線，並要求每次啟動時產生的**存取金鑰**（啟動時自動帶入視窗），其他網頁或程式無法操作它。只有本程式輸出的檔案可以從介面開啟，字幕只能寫成字幕檔副檔名。
+- API Key 以明文存在 `workspace/settings.json`（或 `apikey.txt`），兩者都已列入 `.gitignore`；分享專案資料夾前請先移除。更換 API 位址時需一併重新輸入金鑰。
 
 ## 品質設計
 
@@ -61,14 +70,20 @@
 
 預覽與匯出使用**同一個 Canvas 字幕渲染器**（自動換行、平衡斷行、日文禁則、RTL、描邊、陰影、圓角底框）。
 燒錄硬字幕時，瀏覽器以輸出解析度逐句繪製字幕畫格，FFmpeg 依時間碼疊加（逐格精準）後以 NVENC 編碼——成品與預覽完全一致。
+ASS 字幕檔與 MKV 軟字幕則是**近似樣式**：換行位置、字級、顏色、描邊與位置沿用預覽，但圓角底框、柔和陰影與雙語間距無法以 ASS 完整表達。
+MKV 會內嵌所用字型（一般與粗體，中日韓字型每個約 7 MB），在沒有安裝這些字型的電腦上也能正確顯示；單獨匯出的 ASS 檔則需播放端安裝相同字型。
 音訊律動動畫的頻帶資料由後端預先計算，預覽與匯出共用同一份。
 
 ## 專案結構
 
 ```
-run.py              啟動器
+start.bat           一鍵安裝／啟動（Windows）
+bootstrap.py        環境檢查：.venv、PyTorch（自動選 CUDA 版本）、套件、FFmpeg、模型
+run.py              啟動器（產生存取金鑰、開啟 app 視窗）
 app/
-  server.py         FastAPI API
+  server.py         FastAPI API（存取控制、專案、背景工作）
+  config.py         路徑與設定檔
+  fonts.py          字型快取（本機提供字型、MKV 內嵌）
   asr.py            轉錄管線（VAD、雙軌辨識、融合、對齊、時間修正）
   vad.py            Silero VAD 與切窗
   segmenter.py      斷句與時間整理
@@ -77,14 +92,28 @@ app/
   viz.py            音訊律動頻帶
   exporter.py       影片輸出（硬字幕／軟字幕／音訊製片）
   jobs.py           背景工作
+  dialogs.py        系統原生的資料夾選擇對話框
 web/
-  index.html  app.css  app.js  render.js（共用字幕渲染器）
+  index.html  app.css  app.js
+  render.js         共用字幕渲染器（預覽與燒錄）
+  subparse.js       字幕檔匯入（SRT / VTT / ASS）
 workspace/          專案資料（自動建立）
+tests/              單元與 API 測試（不需 GPU、模型或 FFmpeg）
 ```
+
+## 開發
+
+```
+pip install -r requirements-dev.txt
+python -m pytest
+node --test tests/js/subparse.test.js
+```
+
+直接執行 `python run.py` 時會自動產生存取金鑰並開啟視窗；以 `uvicorn app.server:app` 啟動時，金鑰會印在 log 中（或事先設定環境變數 `LUMEN_TOKEN`），開啟 `http://127.0.0.1:<port>/#k=<金鑰>`。
 
 ## 快捷鍵
 
-Space 播放／暫停 · ←/→ 1 秒（Shift 5 秒）· ↑/↓ 上下句 · S 分割 · W 展開時間軸 · Del 刪除 · Ctrl+Z/Y 復原／重做 · Ctrl+E 匯出 · Ctrl+滾輪 縮放時間軸
+Space 播放／暫停 · ←/→ 1 秒（Shift 5 秒）· ↑/↓ 上下句 · S 分割 · W 展開時間軸 · Del 刪除 · Ctrl+Z/Y 復原／重做 · Ctrl+S 立即儲存 · Ctrl+E 匯出 · Ctrl+滾輪 縮放時間軸
 
 ## 授權
 

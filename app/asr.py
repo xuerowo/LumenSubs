@@ -1,16 +1,18 @@
 """Qwen3-ASR-1.7B transcription + Qwen3-ForcedAligner-0.6B word timestamps.
 
 Pipeline:
-  1. Silero VAD → cut the timeline into ≤40 s chunks at natural pauses
-  2. Batched ASR on the chunks (language forced or auto-detected per chunk)
-  3. Forced alignment per chunk → token timestamps
+  1. Silero VAD → cut the timeline into ≤20 s utterance windows at pauses,
+     grouped into ~100 s (≤150 s) long-context chunks
+  2. Batched ASR twice: on the long chunks (best wording) and on the windows
+     (local precision); the long text is distributed back over the windows
+  3. Forced alignment inside each window → token timestamps
   4. Map aligner tokens back onto the punctuated transcript and repair
      implausible spans (aligner swallowing silence) using the VAD curve
 """
 import difflib
+import gc
 import logging
 import re
-import os
 import threading
 import time
 import unicodedata
@@ -90,7 +92,8 @@ def _install_loop_guard(qwen_model):
     orig = inner.generate
 
     def generate(*a, **kw):
-        kw.setdefault("stopping_criteria", StoppingCriteriaList([_SC()]))
+        # add ours even if the caller already passes stopping criteria
+        kw["stopping_criteria"] = StoppingCriteriaList([*(kw.get("stopping_criteria") or []), _SC()])
         return orig(*a, **kw)
     inner.generate = generate
 
@@ -166,6 +169,7 @@ class ASREngine:
     def _unload(self):
         if self.model is not None:
             self.model = None
+            gc.collect()        # the loop-guard closure forms a reference cycle with the model
             try:
                 import torch
                 torch.cuda.empty_cache()
@@ -181,16 +185,32 @@ class ASREngine:
                    progress: Callable[[float], None] = lambda p: None) -> dict:
         """wav: mono float32 16 kHz. language: UI code or None/auto.
         Returns {language, language_name, words:[{text,s,e,lang}], vad, duration}."""
+        if len(wav) < SR // 10:
+            raise ValueError("音訊太短或沒有聲音內容（少於 0.1 秒）")
         self.ensure_loaded()
         with self._run_lock:
             return self._transcribe(wav, language, context, progress)
+
+    def _decode(self, sub: List[np.ndarray], sub_l, context: str):
+        """model.transcribe with an out-of-memory fallback: halve the batch."""
+        try:
+            return self.model.transcribe(audio=[(s, SR) for s in sub], context=context or "", language=sub_l)
+        except Exception as e:
+            if "out of memory" not in str(e).lower() or len(sub) == 1:
+                raise
+            import torch
+            torch.cuda.empty_cache()
+            h = len(sub) // 2
+            log.warning("CUDA out of memory with batch %d, retrying with %d", len(sub), h)
+            la, lb = (sub_l[:h], sub_l[h:]) if isinstance(sub_l, list) else (sub_l, sub_l)
+            return list(self._decode(sub[:h], la, context)) + list(self._decode(sub[h:], lb, context))
 
     def _asr(self, segs: List[np.ndarray], langs, context: str, bs: int, prog=None):
         texts, names = [], []
         for bi in range(0, len(segs), bs):
             sub = segs[bi: bi + bs]
             sub_l = langs[bi: bi + bs] if isinstance(langs, list) else langs
-            res = self.model.transcribe(audio=[(s, SR) for s in sub], context=context or "", language=sub_l)
+            res = self._decode(sub, sub_l, context)
             for k, r in enumerate(res):
                 forced = sub_l[k] if isinstance(sub_l, list) else sub_l
                 texts.append((r.text or "").strip())
@@ -442,7 +462,6 @@ def map_tokens(text: str, toks: list) -> List[dict]:
 def proportional_words(text: str, lang: str, regions, a: float, b: float) -> List[dict]:
     """Fallback timing when the aligner does not support the language:
     split into words and spread them over the chunk's speech regions."""
-    import re
     parts = re.findall(r"\S+\s*", text) if " " in text.strip() else list(text)
     parts = [x for x in parts if x]
     if not parts:

@@ -1,6 +1,7 @@
 """LumenSubs launcher — starts the local server and opens the app window."""
 import logging
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -56,8 +57,12 @@ def main():
     import uvicorn
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     port = int(os.environ.get("LUMEN_PORT") or free_port())
-    url = f"http://127.0.0.1:{port}/"
-    print(f"\n  LumenSubs 已啟動 → {url}\n")
+    # per-launch secret: every /api call must carry it, so other web pages or
+    # local programs cannot drive the app (see app/server.py)
+    token = os.environ.get("LUMEN_TOKEN") or secrets.token_urlsafe(24)
+    os.environ["LUMEN_PORT"], os.environ["LUMEN_TOKEN"] = str(port), token
+    url = f"http://127.0.0.1:{port}/#k={token}"
+    print(f"\n  LumenSubs 已啟動 → {url}\n  （網址含本次啟動的存取金鑰，請勿分享）\n")
     threading.Thread(target=lambda: (time.sleep(1.2), open_app_window(url)), daemon=True).start()
     uvicorn.run("app.server:app", host="127.0.0.1", port=port, log_level="warning")
 

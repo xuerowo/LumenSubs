@@ -38,8 +38,11 @@ def ask(mode: str = "save", title: str = "", directory: str = "", file: str = ""
     args = {"mode": mode, "title": title, "dir": directory if directory and os.path.isdir(directory) else default_dir(),
             "file": file, "ext": ext, "types": types or []}
     flags = 0x08000000 if os.name == "nt" else 0          # no console window
-    r = subprocess.run([sys.executable, "-c", _SCRIPT, json.dumps(args)], capture_output=True, timeout=1800,
-                       creationflags=flags)
+    try:
+        r = subprocess.run([sys.executable, "-c", _SCRIPT, json.dumps(args)], capture_output=True, timeout=600,
+                           creationflags=flags)
+    except subprocess.TimeoutExpired:
+        return ""
     try:
         p = json.loads(r.stdout.decode("utf-8", "ignore") or "{}").get("path", "")
     except ValueError:

@@ -8,6 +8,7 @@ Soft subtitles: an ASS track muxed into MKV.
 Audio mode: background still (rendered by the browser, incl. crop + veil)
 + optional audio-reactive bars streamed from numpy + subtitles.
 """
+import os
 import re
 import subprocess
 import threading
@@ -46,11 +47,18 @@ def unique(path: Path) -> Path:
     return path
 
 
+FRAME_NAME = re.compile(r"^c\d{5}\.png$")
+
+
 def write_concat(frames_dir: Path, cues: list, duration: float) -> Path:
+    """Concat list of subtitle frames. Frame names are validated so the list
+    can only reference PNGs inside frames_dir (read with the demuxer's safe mode)."""
     lines = ["ffconcat version 1.0"]
     t = 0.0
     blank = "blank.png"
-    for c in sorted(cues, key=lambda c: c["start"]):
+    for c in sorted(cues, key=lambda c: float(c["start"])):
+        if not FRAME_NAME.match(str(c.get("frame", ""))):
+            raise ValueError(f"invalid frame name: {c.get('frame')!r}")
         s, e = max(t, float(c["start"])), min(duration, float(c["end"]))
         if e - s < 0.01:
             continue
@@ -112,15 +120,25 @@ def run_ffmpeg(job, args, duration: float, feeder=None, log_path: Path = None):
         raise RuntimeError("FFmpeg 輸出失敗：" + tail)
 
 
+def _attach(files) -> list:
+    """Embed font files (MKV attachments) so players render the ASS styles as designed."""
+    args = []
+    for i, f in enumerate(files or []):
+        # set the file name explicitly — FFmpeg would otherwise store the full local path
+        args += ["-attach", str(f), f"-metadata:s:t:{i}", "mimetype=application/x-truetype-font",
+                 f"-metadata:s:t:{i}", f"filename={Path(f).name}"]
+    return args
+
+
 def _finish(tmp: Path, final: Path) -> dict:
-    import os
     os.replace(tmp, final)
     return {"file": final.name, "path": str(final), "size": final.stat().st_size}
 
 
 def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) -> dict:
     """meta: mode, burn, width, height, quality, duration, cues[{start,end,frame}],
-    ass, viz, name.  media: {'video': Path} or {'audio': Path, 'viz': Path|None}."""
+    ass, viz, name.  media: {'video': Path} or {'audio': Path, 'viz': Path|None},
+    plus optional 'fonts': [Path] to embed in soft-subtitle MKVs."""
     W, H = int(meta["width"]) // 2 * 2, int(meta["height"]) // 2 * 2
     q = meta.get("quality", "m")
     dur = float(meta["duration"])
@@ -148,12 +166,13 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
         if soft:
             args = ["-i", str(src), "-i", str(ass_path), "-map", "0:v:0", "-map", "0:a?", "-map", "1:0",
                     "-c:v", "copy", "-c:a", "copy", "-c:s", "ass",
-                    "-metadata:s:s:0", f"language={meta.get('sub_lang', 'und')}", "-disposition:s:0", "default", str(out)]
+                    "-metadata:s:s:0", f"language={meta.get('sub_lang', 'und')}", "-disposition:s:0", "default",
+                    *_attach(media.get("fonts")), str(out)]
         else:
             lst = write_concat(frames_dir, meta["cues"], dur)
             fc = (f"[0:v]scale={W}:{H}:flags=lanczos,setsar=1[b];[1:v]format=rgba[s];"
                   f"[b][s]overlay=0:0:format=auto:eof_action=repeat,format=yuv420p[v]")
-            args = ["-i", str(src), "-f", "concat", "-safe", "0", "-i", str(lst), "-filter_complex", fc,
+            args = ["-i", str(src), "-f", "concat", "-i", str(lst), "-filter_complex", fc,
                     "-map", "[v]", "-map", "0:a:0?", *_venc(q), "-c:a", "aac", "-b:a", ABR.get(q, "192k"),
                     "-movflags", "+faststart", "-t", f"{dur:.3f}", str(out)]
         run_ffmpeg(job, args, dur, log_path=log_path)
@@ -205,7 +224,7 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
                 pass
     if not soft:
         lst = write_concat(frames_dir, meta["cues"], dur)
-        inputs += ["-f", "concat", "-safe", "0", "-i", str(lst)]
+        inputs += ["-f", "concat", "-i", str(lst)]
         fc += [f"[{n_in}:v]format=rgba[s]", f"[{last}][s]overlay=0:0:format=auto:eof_action=repeat[vs]"]
         last = "vs"
         n_in += 1
@@ -217,7 +236,7 @@ def export_video(job, meta: dict, frames_dir: Path, out_dir: Path, media: dict) 
     args = [*inputs, "-filter_complex", ";".join(fc), "-map", "[v]", "-map", "1:a:0"]
     if soft:
         args += ["-map", f"{sub_in}:0", "-c:s", "ass", "-metadata:s:s:0", f"language={meta.get('sub_lang', 'und')}",
-                 "-disposition:s:0", "default"]
+                 "-disposition:s:0", "default", *_attach(media.get("fonts"))]
     args += [*_venc(q, still=bands is None), "-r", str(fps), "-c:a", "aac", "-b:a", ABR.get(q, "192k"),
              "-t", f"{dur:.3f}"]
     if not soft:

@@ -1,10 +1,13 @@
 """Silero VAD (ONNX) — frame-level speech probability, used to cut audio at
 natural pauses and to sanity-check forced-alignment timestamps."""
 import glob
+import logging
 import os
 from typing import List, Optional, Tuple
 
 import numpy as np
+
+log = logging.getLogger("lumen.vad")
 
 SR = 16000
 WIN = 512                 # 32 ms per frame
@@ -26,7 +29,9 @@ def _find_model() -> Optional[str]:
     try:
         from huggingface_hub import hf_hub_download
         return hf_hub_download("onnx-community/silero-vad", "onnx/model.onnx")
-    except Exception:
+    except Exception as e:
+        log.warning("Silero VAD model unavailable (%s) — falling back to an energy-based VAD, "
+                    "cue timing will be less precise", e)
         return None
 
 
@@ -148,6 +153,8 @@ def plan_windows(p: np.ndarray, total_sec: float, max_len: float = 20.0, min_len
     """Partition the timeline into utterance-sized windows cut at every pause
     ≥ `pause` seconds; windows longer than max_len are subdivided."""
     n = len(p)
+    if n == 0 or total_sec <= 0:
+        return []
     sm = np.convolve(p, np.ones(5) / 5, mode="same")
     quiet = sm < 0.2
     cuts = []

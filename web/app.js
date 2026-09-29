@@ -30,17 +30,36 @@ const ICON = {
 };
 
 /* ---------------- API ---------------- */
+// per-launch access key: run.py opens the window at /#k=<token>; it is kept in
+// sessionStorage (survives reloads) and removed from the address bar
+const TOKEN = (() => {
+  const m = location.hash.match(/[#&]k=([\w-]+)/);
+  let t = m ? m[1] : '';
+  try {
+    if (t) sessionStorage.setItem('lumenToken', t); else t = sessionStorage.getItem('lumenToken') || '';
+  } catch (e) { }
+  if (m) history.replaceState(null, '', location.pathname + location.search);
+  return t;
+})();
+function tokenLost() {
+  if (tokenLost.shown) return; tokenLost.shown = true;
+  const el = document.createElement('div'); el.className = 'token-lost'; el.setAttribute('role', 'alert');
+  el.textContent = '與 LumenSubs 的連線已失效（程式可能已重新啟動）。請關閉此視窗並重新執行 start.bat；未儲存的編輯已備份在本機，重新開啟專案時會自動還原。';
+  document.body.appendChild(el);
+}
 async function api(method, url, body) {
-  const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const headers = { 'X-Lumen-Token': TOKEN }; if (body) headers['Content-Type'] = 'application/json';
+  const r = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   let d = null; try { d = await r.json(); } catch (e) { }
-  if (!r.ok) throw new Error((d && (d.detail || d.error)) || `HTTP ${r.status}`);
+  if (r.status === 401 && d && d.code === 'token') tokenLost();
+  if (!r.ok) throw Object.assign(new Error((d && (d.detail || d.error)) || `HTTP ${r.status}`), { status: r.status });
   return d;
 }
 function uploadXHR(url, form, onProgress) {
   return new Promise((res, rej) => {
-    const x = new XMLHttpRequest(); x.open('POST', url);
+    const x = new XMLHttpRequest(); x.open('POST', url); x.setRequestHeader('X-Lumen-Token', TOKEN);
     x.upload.onprogress = e => e.lengthComputable && onProgress && onProgress(e.loaded / e.total);
-    x.onload = () => { let d = null; try { d = JSON.parse(x.responseText); } catch (e) { } x.status < 300 ? res(d) : rej(new Error((d && d.detail) || `HTTP ${x.status}`)); };
+    x.onload = () => { let d = null; try { d = JSON.parse(x.responseText); } catch (e) { } if (x.status === 401 && d && d.code === 'token') tokenLost(); x.status < 300 ? res(d) : rej(new Error((d && d.detail) || `HTTP ${x.status}`)); };
     x.onerror = () => rej(new Error('上傳失敗'));
     x.send(form);
   });
@@ -231,7 +250,8 @@ new ResizeObserver(() => { layoutStage(); refreshSegs(); }).observe(stageWrap);
 /* ---------------- media / clock ---------------- */
 function activeMedia() { return state.mode === 'video' ? (video.src ? video : null) : (audio.src ? audio : null); }
 function setPlaying(p) {
-  state.playing = p; stage.classList.toggle('paused', !p);
+  state.playing = p; stage.classList.toggle('paused', !p); document.body.classList.toggle('playing', p);
+  if (p) kick();
   $('#playBtn').innerHTML = p ? ICON.pause : ICON.play;
 }
 function play() {
@@ -252,16 +272,19 @@ function seek(t) {
   }
   frame(true);
 }
-[video, audio].forEach(m => { m.addEventListener('ended', () => setPlaying(false)); m.addEventListener('pause', () => { if (m === activeMedia() && state.playing && !m.seeking) setPlaying(false); }); });
+[video, audio].forEach(m => { m.addEventListener('ended', () => setPlaying(false)); m.addEventListener('pause', () => { if (m === activeMedia() && state.playing && !m.seeking) setPlaying(false); }); m.addEventListener('seeked', () => kick()); });
 
-let last = performance.now();
+// the render loop only runs while something moves (playback, seeking); when
+// idle, a single frame is drawn on demand via kick()
+let last = performance.now(), rafOn = false;
+function kick() { if (!rafOn) { rafOn = true; last = performance.now(); requestAnimationFrame(loop); } }
 function loop(now) {
   const dt = (now - last) / 1000; last = now;
   const m = activeMedia();
   if (m) { if (!m.seeking) state.t = m.currentTime; }
   else if (state.playing) { state.t += dt * state.rate; if (state.t >= state.duration) { state.t = state.duration; setPlaying(false); } }
   frame();
-  requestAnimationFrame(loop);
+  if (state.playing || (m && (m.seeking || !m.paused))) requestAnimationFrame(loop); else rafOn = false;
 }
 let lastTC = '', lastScrollX = -1;
 function findSeg(t) {
@@ -437,7 +460,7 @@ function drawTimelineCanvases() {
     g.beginPath(); g.roundRect ? g.roundRect(x, (wh - h) / 2, 2, h, 1) : g.rect(x, (wh - h) / 2, 2, h); g.fill();
   }
 }
-tlScroll.addEventListener('scroll', () => { lastScrollX = -1; });
+tlScroll.addEventListener('scroll', () => { lastScrollX = -1; kick(); });
 new ResizeObserver(() => { renderTimeline(); }).observe(tlScroll);
 function renderTrack() {
   const Z = state.zoom;
@@ -451,8 +474,8 @@ function scrubStart(e) {
   tlDrag = true; const r = tlInner.getBoundingClientRect();
   const go = ev => seek((ev.clientX - r.left) / state.zoom);
   go(e);
-  const mv = ev => go(ev), up = () => { tlDrag = false; removeEventListener('pointermove', mv); removeEventListener('pointerup', up); };
-  addEventListener('pointermove', mv); addEventListener('pointerup', up);
+  const mv = ev => go(ev), up = () => { tlDrag = false; removeEventListener('pointermove', mv); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); };
+  addEventListener('pointermove', mv); addEventListener('pointerup', up); addEventListener('pointercancel', up);
 }
 [ruler, $('#wave'), track].forEach(el => el.addEventListener('pointerdown', scrubStart));
 
@@ -475,11 +498,11 @@ track.addEventListener('pointerdown', e => {
     posBlock(s); updCueTimes(s); $('#tlSel').textContent = `#${pad(i + 1)}  ${fmt(s.start)} → ${fmt(s.end)}  (${(s.end - s.start).toFixed(2)}s)`;
     frame(true);
   };
-  const up = () => {
-    removeEventListener('pointermove', mv); removeEventListener('pointerup', up); b.classList.remove('moving'); tlDrag = false;
-    if (!moved) { select(s.id, true); seek(s.start + 0.001); } else { select(s.id, false); scheduleSave(); }
+  const up = ev => {
+    removeEventListener('pointermove', mv); removeEventListener('pointerup', up); removeEventListener('pointercancel', up); b.classList.remove('moving'); tlDrag = false;
+    if (!moved) { if (ev.type === 'pointerup') { select(s.id, true); seek(s.start + 0.001); } } else { select(s.id, false); scheduleSave(); }
   };
-  addEventListener('pointermove', mv); addEventListener('pointerup', up);
+  addEventListener('pointermove', mv); addEventListener('pointerup', up); addEventListener('pointercancel', up);
 });
 $('#zoom').addEventListener('input', e => setZoom(sliderToZoom(+e.target.value)));
 function setZoom(z, anchorT) {
@@ -514,27 +537,26 @@ try { if (localStorage.getItem('tlWide')) setTlWide(true, false); } catch (e) { 
 const visLen = s => [...String(s || '').replace(/\s/g, '')].length;
 const cps = s => visLen(s.tgt) / Math.max(.1, s.end - s.start);
 const cpsLimit = () => ['zh-TW', 'zh-CN', 'yue', 'ja', 'ko'].includes(state.tgtLang) ? 9 : 21;
-function hl(text) { const q = state.query.trim(); if (!q) return esc(text); return esc(text).replace(new RegExp(esc(q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), m => `<mark>${m}</mark>`); }
 function cueHTML(s, i) {
   return `<div class="cue ${s.id === state.activeId ? 'active' : ''} ${s.id === state.selId ? 'sel' : ''}" data-id="${s.id}">
     <div class="cue-head">
       <span class="idx">${pad(i + 1)}</span>
-      <input class="tc" data-k="start" value="${fmt(s.start)}" spellcheck="false" title="↑↓ 微調 0.1s，Shift 1s">
+      <input class="tc" data-k="start" value="${fmt(s.start)}" spellcheck="false" title="↑↓ 微調 0.1s，Shift 1s" aria-label="第 ${i + 1} 句開始時間">
       <span class="arrow">→</span>
-      <input class="tc" data-k="end" value="${fmt(s.end)}" spellcheck="false" title="↑↓ 微調 0.1s，Shift 1s">
+      <input class="tc" data-k="end" value="${fmt(s.end)}" spellcheck="false" title="↑↓ 微調 0.1s，Shift 1s" aria-label="第 ${i + 1} 句結束時間">
       <span class="dur">${(s.end - s.start).toFixed(1)}s</span>
       ${cps(s) > cpsLimit() ? '<span class="cps" title="閱讀速度偏快，建議延長顯示時間或精簡譯文"></span>' : ''}
       <div class="cue-actions">
-        <button class="icon-btn" data-a="re" data-tip="重新翻譯">${ICON.refresh}</button>
-        <button class="icon-btn" data-a="split" data-tip="分割">${ICON.split}</button>
-        <button class="icon-btn" data-a="merge" data-tip="與下一句合併">${ICON.merge}</button>
-        <button class="icon-btn" data-a="add" data-tip="在後方插入">${ICON.plus}</button>
-        <button class="icon-btn del" data-a="del" data-tip="刪除">${ICON.trash}</button>
+        <button class="icon-btn" data-a="re" data-tip="重新翻譯" aria-label="重新翻譯第 ${i + 1} 句">${ICON.refresh}</button>
+        <button class="icon-btn" data-a="split" data-tip="分割" aria-label="分割第 ${i + 1} 句">${ICON.split}</button>
+        <button class="icon-btn" data-a="merge" data-tip="與下一句合併" aria-label="第 ${i + 1} 句與下一句合併">${ICON.merge}</button>
+        <button class="icon-btn" data-a="add" data-tip="在後方插入" aria-label="在第 ${i + 1} 句後方插入">${ICON.plus}</button>
+        <button class="icon-btn del" data-a="del" data-tip="刪除" aria-label="刪除第 ${i + 1} 句">${ICON.trash}</button>
       </div>
     </div>
     <div class="cue-body">
-      <textarea class="src" data-k="src" rows="1" spellcheck="false" dir="auto">${esc(s.src)}</textarea>
-      <textarea class="tgt" data-k="tgt" rows="1" spellcheck="false" dir="auto" placeholder="${s.src ? '（尚未翻譯）' : ''}">${esc(s.tgt)}</textarea>
+      <textarea class="src" data-k="src" rows="1" spellcheck="false" dir="auto" aria-label="第 ${i + 1} 句原文">${esc(s.src)}</textarea>
+      <textarea class="tgt" data-k="tgt" rows="1" spellcheck="false" dir="auto" aria-label="第 ${i + 1} 句譯文" placeholder="${s.src ? '（尚未翻譯）' : ''}">${esc(s.tgt)}</textarea>
     </div>
   </div>`;
 }
@@ -543,7 +565,7 @@ function renderList() {
   const list = state.segs.map((s, i) => ({ s, i })).filter(({ s }) => !q || s.src.toLowerCase().includes(q) || s.tgt.toLowerCase().includes(q));
   if (!list.length) {
     cueList.innerHTML = q ? `<div class="list-empty">沒有符合搜尋的字幕</div>` :
-      `<div class="list-empty"><div class="empty-ic">${ICON.spark}</div><b>尚無字幕</b><small>${activeMedia() ? '點擊左下「生成字幕」開始轉錄與翻譯' : (state.mode === 'video' ? '上傳影片後即可生成字幕' : '上傳音訊後即可生成字幕')}</small></div>`;
+      `<div class="list-empty"><div class="empty-ic">${ICON.spark}</div><b>尚無字幕</b><small>${activeMedia() ? '點擊左下「生成字幕」開始轉錄與翻譯' : (state.mode === 'video' ? '上傳影片後即可生成字幕' : '上傳音訊後即可生成字幕')}<br>或將現有的 SRT／VTT／ASS 字幕檔拖放到這裡匯入</small></div>`;
     return;
   }
   cueList.innerHTML = list.map(({ s, i }) => cueHTML(s, i)).join('');
@@ -622,8 +644,8 @@ async function cueAction(a, id) {
   if (a === 're') {
     if (!s.src.trim()) { toast('此句沒有原文', 'info'); return; }
     const c = cueList.querySelector(`.cue[data-id="${id}"]`); c && c.classList.add('busy');
-    const pid0 = await ensureProject();
     try {
+      const pid0 = await ensureProject();
       const d = await api('POST', `/api/projects/${pid0}/retranslate`, {
         segs: state.segs.map(x => ({ src: x.src, tgt: x.tgt })), index: i, src_lang: srcLangCode(), tgt_lang: state.tgtLang,
         tone: state.tone, opts: tOpts(), current: s.tgt,
@@ -696,8 +718,10 @@ $('#offApply').onclick = () => {
   if (!offset) { toast('請先設定偏移量', 'info'); return; }
   snap(); const D = state.duration || 1e9;
   state.segs.forEach(s => { s.start = +clamp(s.start + offset, 0, D).toFixed(3); s.end = +clamp(s.end + offset, 0, D).toFixed(3); });
+  const before = state.segs.length;
   state.segs = state.segs.filter(s => s.end - s.start > 0.05);
-  toast(`全部字幕已${offset > 0 ? '延後' : '提前'} ${Math.abs(offset).toFixed(2)} 秒`); offset = 0; showOff(); segsChanged();
+  const dropped = before - state.segs.length;
+  toast(`全部字幕已${offset > 0 ? '延後' : '提前'} ${Math.abs(offset).toFixed(2)} 秒${dropped ? `，${dropped} 句超出影片範圍已移除（可 Ctrl+Z 復原）` : ''}`, dropped ? 'warn' : 'ok', dropped ? 5000 : 2600); offset = 0; showOff(); segsChanged();
 };
 
 /* ---------------- style panel ---------------- */
@@ -812,26 +836,46 @@ function syncLeftInputs() {
 }
 
 /* ---------------- projects ---------------- */
-let saveTimer = 0, saving = false, dirty = false;
+let saveTimer = 0, saving = false, dirty = false, saveFails = 0, pendingAck = null;
 function serial() {
   return { mode: state.mode, segs: state.segs, style, srcLang: state.srcLang, detected: state.detected, tgtLang: state.tgtLang, tone: state.tone, opts: state.opts, arKey: state.arKey, zoom: state.zoom, t: state.t };
 }
 function setSaved(txt, ok = true) { const t = $('#savedTag'); t.classList.toggle('pending', !ok); $('em', t).textContent = txt; }
 function scheduleSave() {
-  dirty = true;
+  dirty = true; backupSoon();
   if (!project.id) return;
   setSaved('儲存中…', false);
   clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 700);
 }
 async function saveNow() {
-  if (!project.id || saving) { if (saving) { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 400); } return; }
+  if (!project.id) return;
+  if (saving) { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, 400); return; }
   saving = true; dirty = false;
+  const pid = project.id, ack = pendingAck;
   try {
-    await api('PUT', `/api/projects/${project.id}`, { name: $('#projName').value.trim() || '未命名專案', state: serial() });
+    await api('PUT', `/api/projects/${pid}`, { name: $('#projName').value.trim() || '未命名專案', state: serial(), ...(ack ? { ack_job: ack } : {}) });
+    saveFails = 0; if (pendingAck === ack) pendingAck = null;
+    if (!dirty) dropBackup(pid);
     const d = new Date(); setSaved(`已自動儲存 ${pad(d.getHours())}:${pad(d.getMinutes())}`);
-  } catch (e) { setSaved('儲存失敗', false); }
+  } catch (e) {
+    // keep the edits: mark dirty again, back them up locally and retry with backoff
+    dirty = true; saveFails++; writeBackup();
+    setSaved(saveFails > 2 ? '儲存失敗，稍後自動重試（已備份在本機）' : '儲存失敗，重試中…', false);
+    if (e.status !== 401 && project.id === pid) { clearTimeout(saveTimer); saveTimer = setTimeout(saveNow, Math.min(30000, 1000 * 2 ** saveFails)); }
+  }
   saving = false;
 }
+// local safety net: unsaved edits are mirrored to localStorage until the server has them
+const bakKey = pid => 'bak:' + pid;
+let bakTimer = 0;
+function writeBackup() {
+  clearTimeout(bakTimer);
+  if (!project.id || !dirty) return;
+  try { localStorage.setItem(bakKey(project.id), JSON.stringify({ t: Date.now(), name: $('#projName').value, state: serial() })); } catch (e) { }
+}
+function backupSoon() { clearTimeout(bakTimer); bakTimer = setTimeout(writeBackup, 1500); }
+function dropBackup(pid) { try { localStorage.removeItem(bakKey(pid)); } catch (e) { } }
+function readBackup(pid) { try { const b = JSON.parse(localStorage.getItem(bakKey(pid)) || 'null'); return b && b.state ? b : null; } catch (e) { return null; } }
 async function ensureProject() {
   if (project.id) return project.id;
   const p = await api('POST', '/api/projects', { name: $('#projName').value.trim() || '未命名專案' });
@@ -847,15 +891,22 @@ function guardBusy() {
   if (busy || exporting) { toast('請等待目前的工作完成後再切換專案', 'info'); return true; }
   return false;
 }
-async function flushSave() { clearTimeout(saveTimer); if (dirty && project.id) await saveNow(); }
+async function flushSave() {
+  clearTimeout(saveTimer);
+  while (saving) await sleep(50);
+  if ((dirty || pendingAck) && project.id) await saveNow();
+  writeBackup();                        // still dirty = the save failed → keep a local copy
+  clearTimeout(saveTimer); dirty = false; saveFails = 0; pendingAck = null;
+}
 async function openProject(id) {
   await flushSave();
   const p = await api('GET', `/api/projects/${id}`);
   pause();
   project.id = p.id; project.name = p.name; project.media = p.media || {};
   try { localStorage.setItem('lastProject', p.id); } catch (e) { }
-  $('#projName').value = p.name || '未命名專案';
-  const st = p.state || {};
+  const bak = readBackup(p.id);
+  $('#projName').value = (bak && bak.name) || p.name || '未命名專案';
+  const st = (bak && bak.state) || p.state || {};
   style = Object.assign(JSON.parse(JSON.stringify(DEFAULT_STYLE)), st.style || {});
   style.tgt = Object.assign({}, DEFAULT_STYLE.tgt, (st.style || {}).tgt); style.src = Object.assign({}, DEFAULT_STYLE.src, (st.style || {}).src);
   state.segs = (st.segs || []).map(s => ({ id: uid++, start: +s.start, end: +s.end, src: s.src || '', tgt: s.tgt || '' }));
@@ -870,7 +921,8 @@ async function openProject(id) {
   applyMediaUI();
   if (st.t) seek(Math.min(st.t, state.duration || st.t));
   segsChanged();
-  setSaved('已開啟專案');
+  if (bak) { toast('已還原上次尚未儲存的編輯', 'info', 4000); } else { clearTimeout(saveTimer); dirty = false; setSaved('已開啟專案'); }
+  if (p.job) resumeJob(p.id, p.job);
 }
 async function newProject() {
   await flushSave();
@@ -905,7 +957,7 @@ $('#projBtn').onclick = async () => {
       e.stopPropagation();
       if (del.dataset.del === project.id && guardBusy()) return;
       if (!confirm('確定刪除此專案？專案內的媒體與輸出檔案都會被刪除。')) return;
-      await api('DELETE', `/api/projects/${del.dataset.del}`);
+      await api('DELETE', `/api/projects/${del.dataset.del}`); dropBackup(del.dataset.del);
       if (del.dataset.del === project.id) await newProject();
       closePop(); toast('已刪除專案', 'trash'); return;
     }
@@ -1043,10 +1095,52 @@ bindDrop('#dropImg', '#fileImg', f => uploadMedia('image', f));
 ['dragleave', 'drop'].forEach(ev => stage.addEventListener(ev, e => { e.preventDefault(); stage.classList.remove('over'); }));
 stage.addEventListener('drop', e => {
   const f = e.dataTransfer.files[0]; if (!f) return;
+  if (SUB_RE.test(f.name)) { importSubs(f); return; }
   if (f.type.startsWith('image/')) { if (state.mode !== 'audio') setMode('audio'); uploadMedia('image', f); }
   else if (f.type.startsWith('audio/') || /\.(mp3|wav|m4a|flac|ogg|opus|aac|wma)$/i.test(f.name)) { if (state.mode !== 'audio') setMode('audio'); uploadMedia('audio', f); }
   else uploadMedia(state.mode === 'audio' && !f.type.startsWith('video/') ? 'audio' : 'video', f);
 });
+/* ---------------- subtitle import ---------------- */
+const SUB_RE = /\.(srt|vtt|ass|ssa)$/i;
+let impData = null;
+async function importSubs(f) {
+  if (busy || exporting) { toast('請等待目前工作完成', 'info'); return; }
+  if (f.size > 20e6) { toast('字幕檔過大（超過 20 MB）', 'warn'); return; }
+  let parsed = null;
+  try { parsed = SubParse.parse(SubParse.decode(await f.arrayBuffer()), f.name); } catch (e) { }
+  if (!parsed || !parsed.cues.length) { toast('無法讀取這個字幕檔，或檔案中沒有字幕', 'warn', 5000); return; }
+  impData = { name: f.name, ...parsed };
+  const last = parsed.cues[parsed.cues.length - 1].end;
+  $('#impInfo').textContent = `${f.name} · ${parsed.format.toUpperCase()} · ${parsed.cues.length} 句 · ${fmtShort(last)}`;
+  $('#impWarn').hidden = !state.segs.length;
+  setSeg('#impMode', SubParse.guessMode(parsed.cues, state.tgtLang));
+  openModal('#importModal'); updImpPreview();
+}
+function updImpPreview() {
+  if (!impData) return;
+  const segs = SubParse.toSegs(impData.cues.slice(0, 8), segVal('#impMode'));
+  $('#impPrev').innerHTML = `<div class="imp-row imp-head"><span>時間</span><span>原文</span><span>譯文</span></div>` +
+    segs.map(s => `<div class="imp-row"><span class="t">${fmt(s.start)}</span><span class="s">${esc(s.src) || '<i>—</i>'}</span><span class="g">${esc(s.tgt) || '<i>—</i>'}</span></div>`).join('');
+}
+initSeg('#impMode', updImpPreview);
+$('#impOk').onclick = async () => {
+  if (!impData) return;
+  const d = impData, mode = segVal('#impMode');
+  const segs = SubParse.toSegs(d.cues, mode);
+  impData = null; closeModal('#importModal');
+  pause(); snap();
+  state.segs = segs.map(s => ({ id: uid++, ...s })); state.selId = null;
+  if ($('#projName').value === '未命名專案') $('#projName').value = d.name.replace(/\.[^.]+$/, '').slice(0, 60);
+  try { await ensureProject(); } catch (e) { toast(e.message, 'warn'); }
+  updDuration(); segsChanged(); renderDetect(); updLangHeads();
+  const outside = state.duration && project.media[state.mode] ? state.segs.filter(s => s.start >= state.duration).length : 0;
+  toast(`已匯入 ${segs.length} 句字幕${mode === 'src' ? '，可按「重新翻譯」產生譯文' : ''}${outside ? `（${outside} 句超出媒體長度）` : ''}`, outside ? 'warn' : 'spark', 4500);
+};
+$('#importBtn').onclick = () => $('#fileSubs').click();
+$('#fileSubs').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; f && importSubs(f); });
+['dragenter', 'dragover'].forEach(ev => cueList.addEventListener(ev, e => { if ([...e.dataTransfer.items].some(i => i.kind === 'file')) e.preventDefault(); }));
+cueList.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) { e.preventDefault(); SUB_RE.test(f.name) ? importSubs(f) : toast('請拖放 SRT、VTT 或 ASS 字幕檔', 'info'); } });
+
 initSeg('#arSeg', v => { const [a, b] = v.split(':').map(Number); state.audioAR = a / b; state.arKey = v; layoutStage(); scheduleSave(); });
 
 /* ---------------- generate / translate ---------------- */
@@ -1071,6 +1165,47 @@ function setBusy(kind, p, label) {
   }
 }
 $('#cancelBtn').onclick = async () => { if (curJob) { try { await api('POST', `/api/jobs/${curJob}/cancel`); } catch (e) { } } };
+function applyGenResult(res, resumed) {
+  snap();
+  state.segs = res.segs.map(s => ({ id: uid++, start: +s.start, end: +s.end, src: s.src, tgt: s.tgt || '' }));
+  state.detected = res.detected || ''; state.selId = null;
+  segsChanged(); renderDetect(); updLangHeads(); seek(0);
+  const n = state.segs.length, pre = resumed ? '已套用背景完成的生成結果 · ' : '';
+  if (res.translate_error) toast(pre + '轉錄完成，但翻譯失敗：' + res.translate_error, 'warn', 7000);
+  else if (res.translate_failed) toast(`${pre}共 ${n} 句，其中 ${res.translate_failed} 句翻譯失敗，可在該句按「重新翻譯」`, 'warn', 7000);
+  else toast(`${pre}字幕已生成 · 共 ${n} 句`, 'spark');
+}
+function applyTrResult(res, ids) {
+  if (!ids) {                         // resumed after a reload: map by position
+    if (res.tgt.length !== state.segs.length) { toast('背景完成的翻譯與目前字幕數量不符，已略過', 'warn', 5000); return; }
+    ids = state.segs.map(s => s.id);
+  }
+  snap();
+  const byId = new Map(state.segs.map(s => [s.id, s]));
+  ids.forEach((id, i) => { const s = byId.get(id); if (s && res.tgt[i]) s.tgt = res.tgt[i]; });
+  segsChanged();
+  if (res.failed) toast(`已重新翻譯為${langOf(state.tgtLang).l}，其中 ${res.failed} 句失敗（保留原譯文）`, 'warn', 6000);
+  else toast(`已重新翻譯為${langOf(state.tgtLang).l}`, 'spark');
+}
+// a job recorded in project.json: still running → reattach; finished while the
+// window was closed → apply its stored result
+async function resumeJob(pid, j) {
+  if (busy || !j || !j.id) return;
+  const gen = j.kind === 'generate', bk = gen ? 'gen' : 'tr', label = gen ? 'AI 生成中' : '翻譯中';
+  let res = j.result, attached = false;
+  try {
+    if (!res) {
+      attached = true; curJob = j.id; setBusy(bk, 0, label);
+      res = await pollJob(j.id, p => setBusy(bk, p, label));
+    }
+    if (project.id !== pid) return;
+    if (gen) applyGenResult(res, true); else applyTrResult(res, null);
+    pendingAck = j.id; scheduleSave();
+  } catch (e) {
+    if (project.id === pid) { pendingAck = j.id; scheduleSave(); }
+    if (e.cancelled) toast('已取消', 'info'); else if (e.status !== 404) toast(e.message, 'warn', 6000);
+  } finally { if (attached) { curJob = null; setBusy(null); } }
+}
 $('#genBtn').onclick = async () => {
   if (busy) return;
   const med = project.media[state.mode];
@@ -1087,13 +1222,8 @@ $('#genBtn').onclick = async () => {
     });
     curJob = d.job;
     const res = await pollJob(d.job, p => setBusy('gen', p, 'AI 生成中'));
-    if (project.id !== pid) throw new Error('專案已切換，已捨棄生成結果');
-    snap();
-    state.segs = res.segs.map(s => ({ id: uid++, start: +s.start, end: +s.end, src: s.src, tgt: s.tgt || '' }));
-    state.detected = res.detected || ''; state.selId = null;
-    segsChanged(); renderDetect(); updLangHeads(); seek(0);
-    if (res.translate_error) toast('轉錄完成，但翻譯失敗：' + res.translate_error, 'warn', 6000);
-    else toast(`字幕已生成 · 共 ${state.segs.length} 句`, 'spark');
+    if (project.id !== pid) throw new Error('專案已切換，生成結果會在重新開啟該專案時套用');
+    applyGenResult(res); pendingAck = d.job; scheduleSave();
   } catch (e) { if (!e.cancelled) toast(e.message, 'warn', 6000); else toast('已取消', 'info'); }
   curJob = null; setBusy(null);
 };
@@ -1106,11 +1236,8 @@ $('#retrBtn').onclick = async () => {
     const d = await api('POST', `/api/projects/${pid}/translate`, { segs: state.segs.map(s => ({ src: s.src })), src_lang: srcLangCode(), tgt_lang: state.tgtLang, tone: state.tone, opts: tOpts() });
     curJob = d.job;
     const res = await pollJob(d.job, p => setBusy('tr', p, '翻譯中'));
-    if (project.id !== pid) throw new Error('專案已切換，已捨棄翻譯結果');
-    snap();
-    const byId = new Map(state.segs.map(s => [s.id, s]));
-    ids.forEach((id, i) => { const s = byId.get(id); if (s && res.tgt[i] !== undefined) s.tgt = res.tgt[i]; });
-    segsChanged(); toast(`已重新翻譯為${langOf(state.tgtLang).l}`, 'spark');
+    if (project.id !== pid) throw new Error('專案已切換，翻譯結果會在重新開啟該專案時套用');
+    applyTrResult(res, ids); pendingAck = d.job; scheduleSave();
   } catch (e) { if (!e.cancelled) toast(e.message, 'warn', 6000); else toast('已取消', 'info'); }
   curJob = null; setBusy(null);
 };
@@ -1131,8 +1258,12 @@ $('#fsBtn').onclick = () => document.fullscreenElement ? document.exitFullscreen
 document.addEventListener('fullscreenchange', () => setTimeout(layoutStage, 60));
 
 /* ---------------- modals ---------------- */
-function openModal(id) { $(id).classList.add('show'); requestAnimationFrame(refreshSegs); }
-function closeModal(id) { $(id).classList.remove('show'); }
+let modalReturn = null;
+function openModal(id) {
+  modalReturn = document.activeElement; $(id).classList.add('show');
+  requestAnimationFrame(() => { refreshSegs(); const f = $(id).querySelector('input:not([type=hidden]):not([type=color]),textarea,button:not([data-close])'); f && f.focus({ preventScroll: true }); });
+}
+function closeModal(id) { $(id).classList.remove('show'); modalReturn && modalReturn.focus && modalReturn.focus({ preventScroll: true }); modalReturn = null; }
 $$('.modal-bg').forEach(m => { m.addEventListener('pointerdown', e => { m._down = e.target === m; }); m.addEventListener('click', e => { if ((e.target === m && m._down) || e.target.closest('[data-close]')) m.classList.remove('show'); }); });
 $('#kbdBtn').onclick = () => openModal('#kbdModal');
 
@@ -1224,7 +1355,7 @@ async function targetPath(ext) {
   const path = joinPath(outLoc.dir, outBase() + ext);
   const c = await api('POST', '/api/path/check', { path });
   if (c.exists && !confirm(`「${outBase() + ext}」已存在於此資料夾，要覆蓋嗎？`)) return null;
-  return c.path;
+  return { path: c.path, overwrite: c.exists };
 }
 function showDone(path, size, isVideo) {
   const name = path.split(/[\\/]/).pop(), dir = path.slice(0, path.length - name.length - 1);
@@ -1262,7 +1393,7 @@ function updExpHint() {
   const [w, h] = exportDims();
   $('#dlVideoTxt').textContent = soft ? '匯出 MKV 影片' : '匯出 MP4 影片';
   updOutPrev();
-  $('#expHint').innerHTML = `${ICON.info}<span>${soft ? '軟字幕封裝為 MKV（ASS 樣式軌），影像不重新編碼，速度最快；播放器可開關字幕。' : '硬字幕以預覽相同的渲染器逐句繪製後燒錄，成品與預覽完全一致。'} 輸出 ${w}×${h}${state.mode === 'audio' ? ` · 背景圖${state.opts.viz ? '＋音訊律動' : ''}` : ''}</span>`;
+  $('#expHint').innerHTML = `${ICON.info}<span>${soft ? '軟字幕封裝為 MKV（ASS 樣式軌），影像不重新編碼，速度最快；播放器可開關字幕。已內嵌所用字型；圓角底框與柔和陰影為近似效果。' : '硬字幕以預覽相同的渲染器逐句繪製後燒錄，成品與預覽完全一致。'} 輸出 ${w}×${h}${state.mode === 'audio' ? ` · 背景圖${state.opts.viz ? '＋音訊律動' : ''}` : ''}</span>`;
 }
 function textFor(s, c = expContent) {
   const T = s.tgt, S = s.src;
@@ -1270,27 +1401,40 @@ function textFor(s, c = expContent) {
   return style.order === 'tgt-top' ? [T, S].filter(Boolean).join('\n') : [S, T].filter(Boolean).join('\n');
 }
 function assColor(hex, a = 0) { const h = hex.replace('#', ''); return `&H${pad(Math.round(a * 255).toString(16), 2)}${h.slice(4, 6)}${h.slice(2, 4)}${h.slice(0, 2)}`.toUpperCase(); }
-const assEsc = t => String(t).replace(/\\/g, '\\\\').replace(/\{/g, '｛').replace(/\}/g, '｝');
+// ASS has no escape for "\" or braces: swap in look-alike full-width characters
+const assEsc = t => String(t).replace(/\\/g, '＼').replace(/\{/g, '｛').replace(/\}/g, '｝');
+function assTime(t) { const cs = Math.round(Math.max(0, t) * 100); return `${Math.floor(cs / 360000)}:${pad(Math.floor(cs / 6000) % 60)}:${pad(Math.floor(cs / 100) % 60)}.${pad(cs % 100)}`; }
+// ASS/VSFilter font size is the cell height (ascent + descent), the canvas uses the em size
+function assFontSize(c) {
+  try {
+    const g = document.createElement('canvas').getContext('2d'); g.font = `${c.weight} 100px ${SubRender.stack(c.font)}`;
+    const m = g.measureText('Hg國'), k = (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent) / 100;
+    if (k > 0.8 && k < 2.5) return Math.round(c.size * k);
+  } catch (e) { }
+  return Math.round(c.size * 1.3);
+}
 function buildASS(content = expContent, dims) {
   const [W, H] = dims || exportDims();
   const k = 1080 / Math.min(W, H);
   const PX = Math.round(W * k), PY = Math.round(H * k);
   const cv = document.createElement('canvas').getContext('2d');
   const isBox = style.bg === 'box';
-  const st = (n, c) => `Style: ${n},${c.font},${Math.round(c.size)},${assColor(c.color)},&H000000FF,${isBox ? assColor(style.boxColor, 1 - style.boxOpacity) : assColor(c.strokeColor)},${style.bg === 'shadow' ? '&H59230C00' : '&H00000000'},${c.weight >= 700 ? -1 : 0},0,0,0,100,100,0,0,${isBox ? 3 : 1},${isBox ? 8 : c.stroke},${style.bg === 'shadow' ? 2 : 0},8,20,20,20,1`;
-  const at = t => fmtFull(t, '.').slice(1, -1);
+  const st = (n, c) => `Style: ${n},${c.font},${assFontSize(c)},${assColor(c.color)},&H000000FF,${isBox ? assColor(style.boxColor, 1 - style.boxOpacity) : assColor(c.strokeColor)},${style.bg === 'shadow' ? '&H59230C00' : '&H00000000'},${c.weight >= 600 ? -1 : 0},0,0,0,100,100,0,0,${isBox ? 3 : 1},${isBox ? 8 : c.stroke},${style.bg === 'shadow' ? 2 : 0},8,20,20,20,1`;
   const ev = state.segs.map(s => {
     const L = SubRender.layout(cv, s, style, PX, PY, content);
     if (!L) return '';
     const parts = L.blocks.map(b => `{\\r${b.k === 'tgt' ? 'Tgt' : 'Src'}}` + b.lines.map(l => assEsc(l.t)).join('\\N'));
-    return `Dialogue: 0,${at(s.start)},${at(s.end)},Tgt,,0,0,0,,{\\an8\\pos(${Math.round(L.cx)},${Math.round(L.y)})}${parts.join('\\N')}`;
+    return `Dialogue: 0,${assTime(s.start)},${assTime(s.end)},Tgt,,0,0,0,,{\\an8\\pos(${Math.round(L.cx)},${Math.round(L.y)})}${parts.join('\\N')}`;
   }).filter(Boolean);
   return `[Script Info]\nTitle: ${$('#projName').value}\nScriptType: v4.00+\nPlayResX: ${PX}\nPlayResY: ${PY}\nWrapStyle: 2\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n${st('Tgt', style.tgt)}\n${st('Src', style.src)}\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n${ev.join('\n')}\n`;
 }
+// a blank line or "-->" inside the text would break the cue structure
+const cueText = s => textFor(s).replace(/\r/g, '').replace(/[ \t]*\n[\s]*/g, '\n').replace(/-->/g, '→').trim();
+const vttEsc = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function build(fmtK) {
-  const segs = state.segs.filter(s => textFor(s).trim());
-  if (fmtK === 'srt') return segs.map((s, i) => `${i + 1}\n${fmtFull(s.start)} --> ${fmtFull(s.end)}\n${textFor(s)}\n`).join('\n');
-  if (fmtK === 'vtt') return 'WEBVTT\n\n' + segs.map((s, i) => `${i + 1}\n${fmtFull(s.start, '.')} --> ${fmtFull(s.end, '.')}\n${textFor(s)}\n`).join('\n');
+  const segs = state.segs.filter(s => cueText(s));
+  if (fmtK === 'srt') return segs.map((s, i) => `${i + 1}\n${fmtFull(s.start)} --> ${fmtFull(s.end)}\n${cueText(s)}\n`).join('\n');
+  if (fmtK === 'vtt') return 'WEBVTT\n\n' + segs.map((s, i) => `${i + 1}\n${fmtFull(s.start, '.')} --> ${fmtFull(s.end, '.')}\n${vttEsc(cueText(s))}\n`).join('\n');
   if (fmtK === 'txt') return segs.map(s => `[${fmtShort(s.start)}] ${textFor(s).replace(/\n/g, '\n        ')}`).join('\n');
   return buildASS();
 }
@@ -1298,8 +1442,8 @@ function updPreview() { const txt = state.segs.length ? build(expFmt).split('\n'
 $('#dlSub').onclick = async () => {
   if (!state.segs.length) { toast('尚無字幕可匯出', 'info'); return; }
   try {
-    const path = await targetPath('.' + expFmt); if (!path) return;
-    const r = await api('POST', '/api/export/subtitle', { path, content: build(expFmt) });
+    const tp = await targetPath('.' + expFmt); if (!tp) return;
+    const r = await api('POST', '/api/export/subtitle', { path: tp.path, overwrite: tp.overwrite, content: build(expFmt) });
     showDone(r.path, r.size, false); toast('字幕檔已儲存');
   } catch (e) { toast(e.message, 'warn', 5000); }
 };
@@ -1312,14 +1456,15 @@ $('#dlVideo').onclick = async () => {
   if (!med || !med.ready) { toast(mode === 'video' ? '請先上傳影片' : '請先上傳音訊', 'info'); return; }
   const soft = segVal('#burnSeg') === 'soft';
   const [W, H] = exportDims();
-  let outPath;
-  try { outPath = await targetPath(vidExt()); } catch (e) { toast(e.message, 'warn', 5000); return; }
-  if (!outPath) return;
+  let tp;
+  try { tp = await targetPath(vidExt()); } catch (e) { toast(e.message, 'warn', 5000); return; }
+  if (!tp) return;
+  let pid = null, session = '';
   exporting = true; $('#expDone').hidden = true; $('#dlVideoTxt').textContent = '取消輸出'; $('#dlVideo').classList.add('danger');
   pause();
   try {
-    const pid = await ensureProject();
-    const session = Math.random().toString(36).slice(2, 12).replace(/[^a-z0-9]/g, 'x');
+    pid = await ensureProject();
+    session = Math.random().toString(36).slice(2, 12).replace(/[^a-z0-9]/g, 'x');
     const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
     const g = cv.getContext('2d');
     let batch = new FormData(), nb = 0;
@@ -1350,8 +1495,8 @@ $('#dlVideo').onclick = async () => {
     expProgress(0.3, '編碼影片中…');
     const meta = {
       mode, burn: soft ? 'soft' : 'hard', width: W, height: H, quality: segVal('#qSeg'), duration: state.duration,
-      cues, viz: mode === 'audio' && state.opts.viz, name: outBase(), out_path: outPath,
-      ass: soft ? buildASS(expContent, [W, H]) : '', sub_lang: expContent === 'src' ? (srcLangCode() || 'und') : state.tgtLang,
+      cues, viz: mode === 'audio' && state.opts.viz, name: outBase(), out_path: tp.path, overwrite: tp.overwrite,
+      ass: soft ? buildASS(expContent, [W, H]) : '', fonts: soft ? [...new Set([expContent !== 'src' && style.tgt.font, expContent !== 'tgt' && style.src.font].filter(Boolean))] : [], sub_lang: expContent === 'src' ? (srcLangCode() || 'und') : state.tgtLang,
     };
     const d = await api('POST', `/api/projects/${pid}/export/video`, { session, meta });
     expJob = d.job;
@@ -1361,6 +1506,8 @@ $('#dlVideo').onclick = async () => {
     toast('影片輸出完成', 'spark');
   } catch (e) {
     $('#expProg').hidden = true;
+    // frames uploaded before encoding started would otherwise stay on disk
+    if (!expJob && pid && session) api('POST', `/api/projects/${pid}/export/frames/discard`, { session }).catch(() => { });
     if (!e.cancelled) toast(e.message, 'warn', 7000); else toast('已取消輸出', 'info');
   }
   exporting = false; expJob = null; $('#dlVideo').classList.remove('danger'); updExpHint();
@@ -1368,7 +1515,8 @@ $('#dlVideo').onclick = async () => {
 
 /* ---------------- keyboard ---------------- */
 document.addEventListener('keydown', e => {
-  const typing = e.target.matches('input:not([type=range]),textarea,[contenteditable]');
+  const typing = e.target.matches('input:not([type=range]),textarea,select,[contenteditable]');
+  const onRange = e.target.matches('input[type=range]'), onButton = !!e.target.closest('button,[role=button],[role=switch],a[href]');
   if ((e.ctrlKey || e.metaKey) && !typing) {
     if (e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
     if (e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
@@ -1377,6 +1525,8 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveNow(); return; }
   if (e.key === 'Escape') { $$('.modal-bg.show').forEach(m => m.classList.remove('show')); closePop(); if (typing) e.target.blur(); return; }
   if (typing || $('.modal-bg.show')) return;
+  if (onButton && (e.code === 'Space' || e.key === 'Enter')) return;
+  if (onRange && e.key.startsWith('Arrow')) return;
   if (e.code === 'Space') { e.preventDefault(); toggle(); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); seek(state.t - (e.shiftKey ? 5 : 1)); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); seek(state.t + (e.shiftKey ? 5 : 1)); }
@@ -1384,18 +1534,47 @@ document.addEventListener('keydown', e => {
   else if (e.key === 'ArrowDown') { e.preventDefault(); jumpCue(1); }
   else if (e.key.toLowerCase() === 's' && !e.ctrlKey) splitAtPlayhead();
   else if (e.key.toLowerCase() === 'w' && !e.ctrlKey && !e.metaKey) $('#tlWide').click();
-  else if ((e.key === 'Delete' || e.key === 'Backspace') && state.selId) cueAction('del', state.selId);
+  else if (e.key === 'Delete' && state.selId) cueAction('del', state.selId);
 });
 $('#undoBtn').onclick = undo; $('#redoBtn').onclick = redo;
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && dirty && project.id) { clearTimeout(saveTimer); saveNow(); } });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden' && dirty && project.id) { writeBackup(); clearTimeout(saveTimer); saveNow(); } });
 window.addEventListener('pagehide', () => {
   if (!dirty || !project.id) return;
-  const blob = new Blob([JSON.stringify({ name: $('#projName').value, state: serial() })], { type: 'application/json' });
-  navigator.sendBeacon(`/api/projects/${project.id}/save`, blob);
+  writeBackup();                        // synchronous, always succeeds within quota
+  const blob = new Blob([JSON.stringify({ name: $('#projName').value, state: serial(), ...(pendingAck ? { ack_job: pendingAck } : {}) })], { type: 'application/json' });
+  if (blob.size < 60000) navigator.sendBeacon(`/api/projects/${project.id}/save?t=${encodeURIComponent(TOKEN)}`, blob);   // beacons are capped at 64 KB
 });
+
+/* ---------------- accessibility ---------------- */
+function initA11y() {
+  $$('[data-tip]').forEach(el => { if (!el.hasAttribute('aria-label') && !el.textContent.trim()) el.setAttribute('aria-label', el.dataset.tip); });
+  $$('[data-close]').forEach(el => { if (!el.hasAttribute('aria-label') && !el.textContent.trim()) el.setAttribute('aria-label', '關閉'); });
+  const activate = (el, fn) => el.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); fn(); } });
+  $$('.drop').forEach(z => { const inp = $('input[type=file]', z); if (!inp) return; z.tabIndex = 0; z.setAttribute('role', 'button'); activate(z, () => inp.click()); });
+  $$('.toggle-row').forEach(r => {
+    const sw = $('.sw', r); if (!sw) return;
+    r.tabIndex = 0; r.setAttribute('role', 'switch');
+    const upd = () => r.setAttribute('aria-checked', String(sw.classList.contains('on'))); upd();
+    new MutationObserver(upd).observe(sw, { attributes: true, attributeFilter: ['class'] });
+    activate(r, () => r.click());
+  });
+  $$('.modal-bg').forEach(m => { const box = m.firstElementChild; if (box) { box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); } });
+  // keep Tab inside an open dialog
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    const m = $('.modal-bg.show'); if (!m) return;
+    const f = $$('button,input,textarea,select,[tabindex="0"]', m).filter(x => !x.disabled && x.offsetParent !== null);
+    if (!f.length) return;
+    if (e.shiftKey && document.activeElement === f[0]) { e.preventDefault(); f[f.length - 1].focus(); }
+    else if (!e.shiftKey && document.activeElement === f[f.length - 1]) { e.preventDefault(); f[0].focus(); }
+    else if (!m.contains(document.activeElement)) { e.preventDefault(); f[0].focus(); }
+  });
+  const t = $('#toasts'); t.setAttribute('role', 'status'); t.setAttribute('aria-live', 'polite');
+}
 
 /* ---------------- boot ---------------- */
 (async function boot() {
+  initA11y();
   $('#zoom').value = zoomToSlider(state.zoom);
   $$('input[type=range]').forEach(fillRange);
   syncStyleInputs(); syncLeftInputs();
@@ -1404,5 +1583,5 @@ window.addEventListener('pagehide', () => {
   let last = null; try { last = localStorage.getItem('lastProject'); } catch (e) { }
   if (last) { try { await openProject(last); } catch (e) { try { localStorage.removeItem('lastProject'); } catch (x) { } } }
   document.fonts && document.fonts.ready.then(() => { refreshSegs(); bumpStyle(); });
-  requestAnimationFrame(loop);
+  kick();
 })();

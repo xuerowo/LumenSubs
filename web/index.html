@@ -5,9 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LumenSubs 字幕工作室</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%233b8bff'/%3E%3Cstop offset='1' stop-color='%2319c8ee'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='24' height='24' rx='6' fill='url(%23g)'/%3E%3Cpath d='M7 15h4M14 15h3M7 11h2M12 11h5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700;900&family=Noto+Serif+TC:wght@500;700;900&family=LXGW+WenKai+TC:wght@400;700&family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Sans+JP:wght@400;500;700;900&family=Noto+Sans+KR:wght@400;500;700;900&family=Noto+Sans+Thai:wght@400;500;700;900&family=Noto+Sans+Arabic:wght@400;500;700;900&family=Noto+Sans+Hebrew:wght@400;500;700;900&family=Noto+Sans+Devanagari:wght@400;500;700;900&family=Inter:wght@400;500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/fonts/fonts.css">
 <link rel="stylesheet" href="/web/app.css">
 </head>
 <body>
@@ -208,6 +206,8 @@
         <div class="toolbar">
           <div class="search"><svg class="svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg><input id="q" placeholder="搜尋原文或譯文…"><button class="icon-btn sm" id="qClear" hidden><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
           <label class="follow"><span class="sw on" id="followSw"></span>跟隨播放</label>
+          <button class="icon-btn" id="importBtn" data-tip="匯入字幕檔（SRT · VTT · ASS）"><svg class="svg" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"/></svg></button>
+          <input type="file" id="fileSubs" accept=".srt,.vtt,.ass,.ssa" hidden>
         </div>
         <div class="offset-bar">
           <svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>整體時間偏移
@@ -383,6 +383,29 @@
   </div>
 </div>
 
+<!-- ============ IMPORT MODAL ============ -->
+<div class="modal-bg" id="importModal">
+  <div class="modal panel" style="width:600px">
+    <div class="m-head">
+      <div class="ic"><svg class="svg" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M12 18v-6M9 15l3 3 3-3"/></svg></div>
+      <div><h3>匯入字幕</h3><p id="impInfo"></p></div>
+      <button class="icon-btn" data-close><svg class="svg" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    </div>
+    <div class="m-body scroll">
+      <div class="m-sec">
+        <div class="sec-title">字幕內容匯入為</div>
+        <div class="seg" id="impMode"><button data-v="src" class="on">原文</button><button data-v="tgt">譯文</button><button data-v="tgt-top">雙語 · 上譯下原</button><button data-v="src-top">雙語 · 上原下譯</button></div>
+        <div class="imp-prev" id="impPrev"></div>
+        <div class="hint"><svg class="svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg><span>只匯入原文時，可接著按「重新翻譯」產生譯文。<b id="impWarn" hidden>匯入會取代目前的字幕（可用 Ctrl+Z 復原）。</b></span></div>
+      </div>
+    </div>
+    <div class="m-foot">
+      <button class="btn ghost" data-close>取消</button>
+      <button class="btn primary" id="impOk"><span>匯入</span></button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ SHORTCUTS MODAL ============ -->
 <div class="modal-bg" id="kbdModal">
   <div class="modal panel" style="width:480px">
@@ -404,6 +427,7 @@
         <div>時間碼微調 <span><kbd>↑</kbd> <kbd>↓</kbd></span></div>
         <div>時間軸縮放 <kbd>Ctrl 滾輪</kbd></div>
         <div>匯出 <kbd>Ctrl E</kbd></div>
+        <div>立即儲存 <kbd>Ctrl S</kbd></div>
         <div>字幕內換行 <kbd>Shift Enter</kbd></div>
       </div>
     </div>
@@ -413,6 +437,7 @@
 <div class="pop" id="pop"></div>
 <div class="toasts" id="toasts"></div>
 <script src="/web/render.js"></script>
+<script src="/web/subparse.js"></script>
 <script src="/web/app.js"></script>
 </body>
 </html>

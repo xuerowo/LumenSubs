@@ -1,5 +1,5 @@
 :root{
-  --ink:#0b2342; --ink-2:#3b5676; --ink-3:#7c93ae; --ink-4:#a9bbd0;
+  --ink:#0b2342; --ink-2:#3b5676; --ink-3:#566b87; --ink-4:#a9bbd0;
   --accent:#2a7bff; --accent-2:#1cc6ee; --accent-3:#6aa8ff;
   --accent-soft:rgba(42,123,255,.10); --accent-line:rgba(42,123,255,.35);
   --line:rgba(116,156,204,.22); --line-2:rgba(116,156,204,.35);
@@ -350,7 +350,7 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border:none;border-ra
 .dur{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-left:2px}
 .cps{width:7px;height:7px;border-radius:50%;background:var(--warn);box-shadow:0 0 0 3px rgba(245,158,11,.18);margin-left:2px}
 .cue-actions{margin-left:auto;display:flex;gap:1px;opacity:0;transition:opacity .2s}
-.cue:hover .cue-actions,.cue.sel .cue-actions{opacity:1}
+.cue:hover .cue-actions,.cue.sel .cue-actions,.cue:focus-within .cue-actions{opacity:1}
 .cue-actions .icon-btn{width:24px;height:24px;border-radius:7px}
 .cue-actions .icon-btn .svg{width:13px;height:13px}
 .cue-actions .icon-btn.del:hover{color:var(--danger)}
@@ -600,3 +600,29 @@ kbd{font-family:var(--mono);font-size:10.5px;padding:1px 6px;border-radius:5px;b
 .out-prev b{font-family:var(--mono);font-weight:600;color:var(--ink-2);background:rgba(255,255,255,.6);padding:2px 7px;border-radius:6px;box-shadow:inset 0 0 0 1px #fff}
 .out-prev i{width:1px;height:12px;background:var(--line-2);margin:0 4px}
 .ed-meta small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- performance / accessibility ---------- */
+/* long cue lists: the browser skips layout & paint of off-screen cues */
+.cue{content-visibility:auto;contain-intrinsic-size:auto 96px}
+/* the drifting background blobs compete with video decoding for the GPU */
+body.playing .blob{animation-play-state:paused}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.cue textarea:focus-visible,.tc:focus-visible,.proj input:focus-visible,.search input:focus-visible{outline:none}
+.drop:focus-visible,.toggle-row:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:12px}
+@media (prefers-reduced-motion:reduce){
+  .blob{animation:none}
+  *,*::before,*::after{transition-duration:.01ms!important;animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important}
+}
+.token-lost{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:1000;max-width:640px;padding:12px 18px;border-radius:14px;
+  background:#fff4f5;color:#8a1c2e;box-shadow:0 0 0 1px rgba(239,79,107,.35),0 18px 40px -18px rgba(120,20,40,.45);font-size:13px;line-height:1.55}
+
+/* ---------- subtitle import ---------- */
+.imp-prev{margin:14px 0 12px;border-radius:12px;background:rgba(255,255,255,.55);box-shadow:inset 0 0 0 1px rgba(255,255,255,.9);padding:6px 0;max-height:260px;overflow:auto}
+.imp-row{display:grid;grid-template-columns:78px 1fr 1fr;gap:10px;padding:6px 12px;font-size:12px;line-height:1.45;border-bottom:1px solid var(--line)}
+.imp-row:last-child{border-bottom:none}
+.imp-row .t{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);padding-top:2px}
+.imp-row .s{color:var(--ink-2)}
+.imp-row .g{color:var(--ink);font-weight:600}
+.imp-row i{color:var(--ink-4);font-style:normal}
+.imp-head{font-size:10.5px;font-weight:800;letter-spacing:.12em;color:var(--ink-3)}
+.hint b{font-weight:700;color:var(--ink-2)}

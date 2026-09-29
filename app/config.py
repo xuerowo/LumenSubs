@@ -3,6 +3,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
@@ -36,25 +37,64 @@ def _read_apikey_file() -> str:
         return ""
 
 
+def _read_file() -> dict:
+    try:
+        d = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def load_settings() -> dict:
     s = dict(DEFAULT_SETTINGS)
-    try:
-        s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        pass
+    s.update(_read_file())
     if not s.get("api_key"):
         s["api_key"] = _read_apikey_file()
     return s
 
 
+def check_base_url(url: str) -> str:
+    """Only https endpoints (plain http is allowed for a local server)."""
+    url = (url or "").strip().rstrip("/")
+    p = urlparse(url)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise ValueError("API 位址格式不正確，例如 https://api.deepseek.com")
+    if p.scheme == "http" and p.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("API 位址必須使用 https（避免金鑰以明文傳送）")
+    return url
+
+
+def _clean(patch: dict) -> dict:
+    out = {}
+    for k, v in patch.items():
+        if k not in DEFAULT_SETTINGS or v is None:
+            continue
+        if k == "base_url":
+            v = check_base_url(v)
+        elif k == "device":
+            if v not in ("cuda", "cpu"):
+                continue
+        elif k == "max_chars":
+            try:
+                v = max(16, min(120, int(v)))
+            except (TypeError, ValueError):
+                continue
+        elif not isinstance(v, str):
+            continue
+        out[k] = v
+    return out
+
+
 def save_settings(patch: dict) -> dict:
+    """Merge `patch` into settings.json (atomically). The key from apikey.txt
+    is never copied into settings.json."""
     with _lock:
-        s = load_settings()
-        for k in DEFAULT_SETTINGS:
-            if k in patch and patch[k] is not None:
-                s[k] = patch[k]
-        SETTINGS_FILE.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
-        return s
+        s = _read_file()
+        s.update(_clean(patch))
+        tmp = SETTINGS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, SETTINGS_FILE)
+    return load_settings()
 
 
 def public_settings() -> dict:

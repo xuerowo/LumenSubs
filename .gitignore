@@ -11,18 +11,19 @@ prototype/
 # python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
-# media / test files
-*.wav
-*.mp3
-*.m4a
-*.flac
-*.mp4
-*.mkv
-*.mov
-*.jpg
-*.jpeg
-*.png
+# media / test files (root only, so docs/ screenshots can be committed)
+/*.wav
+/*.mp3
+/*.m4a
+/*.flac
+/*.mp4
+/*.mkv
+/*.mov
+/*.jpg
+/*.jpeg
+/*.png
 *.whl
 
 # editors / OS
