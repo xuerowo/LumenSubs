@@ -24,6 +24,9 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PROJECTS_DIR", projects)
     monkeypatch.setattr(config, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.setattr(config, "APIKEY_FILE", tmp_path / "apikey.txt")
+    for name in ("LOG_DIR", "TMP_DIR", "TRASH_DIR"):
+        monkeypatch.setattr(config, name, tmp_path / name.lower().replace("_dir", ""))
+    monkeypatch.setattr(config, "USAGE_FILE", tmp_path / "usage.json")
     return tmp_path
 
 
@@ -38,3 +41,10 @@ def client(workspace):
 @pytest.fixture
 def auth():
     return {"X-Lumen-Token": TOKEN}
+
+
+@pytest.fixture(autouse=True)
+def no_retry_wait(monkeypatch):
+    """Tests simulate failing services; don't sit out the real back-off."""
+    from app import translator
+    monkeypatch.setattr(translator, "RETRY_WAIT", 0.0)

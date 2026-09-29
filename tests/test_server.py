@@ -37,12 +37,15 @@ def test_port_is_enforced_when_known(workspace, auth, monkeypatch):
     assert TestClient(server.app, base_url="http://localhost:8765").get("/api/settings", headers=auth).status_code == 200
 
 
-def test_media_files_need_no_token_but_stay_in_project(client, auth, workspace):
+def test_media_files_take_the_token_in_the_query_and_stay_in_project(client, auth, workspace):
     pid = new_project(client, auth)
     (workspace / "projects" / pid / "a.txt").write_text("hi")
-    assert client.get(f"/api/projects/{pid}/files/a.txt").text == "hi"
+    assert client.get(f"/api/projects/{pid}/files/a.txt").status_code == 401
+    assert client.get(f"/api/projects/{pid}/files/a.txt?t=test-token").text == "hi"
+    # the project file itself (transcript) is never served as a media file
+    assert client.get(f"/api/projects/{pid}/files/project.json?t=test-token").status_code == 404
     for evil in ("../../settings.json", "..%2F..%2Fsettings.json", "..%5C..%5Csettings.json"):
-        assert client.get(f"/api/projects/{pid}/files/{evil}").status_code in (401, 404)
+        assert client.get(f"/api/projects/{pid}/files/{evil}?t=test-token").status_code in (400, 404)
     assert client.get(f"/api/projects/{pid}").status_code == 401
 
 
@@ -147,5 +150,143 @@ def test_sweep_removes_leftovers(client, auth, workspace):
     for name in ("video_work_new", "video_work_old", "exports/_frames_abc"):
         (d / name).mkdir(parents=True)
     server._sweep_workspace()
-    assert sorted(p.name for p in d.iterdir()) == ["exports", "project.json", "video_src_new.mp4", "video_work_new"]
+    assert sorted(p.name for p in d.iterdir() if p.name != "project.json.bak") ==         ["exports", "project.json", "video_src_new.mp4", "video_work_new"]
     assert not any((d / "exports").iterdir())
+
+
+# ---------------------------------------------------------------- robustness (assessment fixes)
+def test_second_window_cannot_silently_overwrite(client, auth):
+    pid = new_project(client, auth)
+    r1 = client.put(f"/api/projects/{pid}", json={"state": {"segs": [1]}, "base_rev": 0}, headers=auth)
+    assert r1.json()["rev"] == 1
+    # a window that still thinks the project is at revision 0
+    r2 = client.put(f"/api/projects/{pid}", json={"state": {"segs": [2]}, "base_rev": 0}, headers=auth)
+    assert r2.status_code == 409 and r2.json()["code"] == "conflict" and r2.json()["rev"] == 1
+    assert client.get(f"/api/projects/{pid}", headers=auth).json()["state"] == {"segs": [1]}
+    r3 = client.put(f"/api/projects/{pid}", json={"state": {"segs": [2]}, "base_rev": 0, "force": True}, headers=auth)
+    assert r3.status_code == 200 and r3.json()["rev"] == 2
+    # job bookkeeping by the server does not count as an edit
+    server.save_project(pid, {"job": {"id": "x", "kind": "generate"}})
+    assert client.put(f"/api/projects/{pid}", json={"state": {}, "base_rev": 2}, headers=auth).status_code == 200
+
+
+def test_project_list_has_no_cap_and_shows_broken_projects(client, auth, workspace):
+    ids = [new_project(client, auth) for _ in range(55)]
+    broken = workspace / "projects" / ids[0] / "project.json"
+    broken.write_text("{", encoding="utf-8")
+    for f in broken.parent.glob("project.json.bak"):
+        f.unlink()
+    items = client.get("/api/projects", headers=auth).json()
+    assert len(items) == 55
+    b = next(x for x in items if x["id"] == ids[0])
+    assert b["broken"] and "size" in b
+
+
+def test_damaged_project_is_recovered_from_backup(client, auth, workspace):
+    pid = new_project(client, auth)
+    client.put(f"/api/projects/{pid}", json={"name": "keep"}, headers=auth)
+    f = workspace / "projects" / pid / "project.json"
+    (workspace / "projects" / pid / "project.json.bak").write_text(f.read_text("utf-8"), encoding="utf-8")
+    f.write_text("", encoding="utf-8")
+    p = client.get(f"/api/projects/{pid}", headers=auth).json()
+    assert p["name"] == "keep" and p["recovered"] is True
+
+
+def test_delete_moves_project_out_and_cancels_its_jobs(client, auth, workspace):
+    from app import jobs
+    pid = new_project(client, auth)
+    (workspace / "projects" / pid / "video_src_x.mp4").write_bytes(b"x" * 10)
+    j = jobs.Job("media", pid)
+    jobs.JOBS[j.id] = j
+    r = client.delete(f"/api/projects/{pid}", headers=auth).json()
+    assert r == {"ok": True, "leftover": False}
+    assert not (workspace / "projects" / pid).exists() and j.cancelled()
+    jobs.JOBS.pop(j.id, None)
+
+
+def test_upload_space_is_checked_before_uploading(client, auth, monkeypatch):
+    pid = new_project(client, auth)
+    monkeypatch.setattr(server.shutil, "disk_usage", lambda p: type("U", (), {"free": 1 << 30})())
+    r = client.post(f"/api/projects/{pid}/media/check", json={"size": 5 << 30}, headers=auth)
+    assert r.status_code == 507 and "磁碟空間不足" in r.json()["detail"]
+    assert client.post(f"/api/projects/{pid}/media/check", json={"size": 1 << 20}, headers=auth).status_code == 200
+
+
+def test_security_headers_and_readable_errors(client, auth):
+    r = client.get("/", headers=auth)
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    r = client.get("/api/jobs/nope", headers=auth)
+    assert r.status_code == 404 and "背景工作" in r.json()["detail"]
+    assert client.get("/api/projects/bad.id", headers=auth).json()["detail"] == "專案編號不正確"
+
+
+def test_export_refuses_a_second_export_of_the_same_project(client, auth):
+    from app import jobs
+    pid = new_project(client, auth)
+    server.save_project(pid, {"media": {"video": {"file": "v.mp4", "ready": True}}})
+    j = jobs.Job("export", pid)
+    jobs.JOBS[j.id] = j
+    meta = {"mode": "video", "width": 1920, "height": 1080, "duration": 5, "cues": []}
+    r = client.post(f"/api/projects/{pid}/export/video", json={"session": "abc", "meta": meta}, headers=auth)
+    assert r.status_code == 409
+    j.status = "done"
+
+
+def test_generate_without_translation_and_with_proofreading(client, auth, workspace, monkeypatch):
+    """The whole /generate flow with a fake speech model and translation service."""
+    import numpy as np
+    from app import jobs, media
+    from app import server as srv
+    pid = new_project(client, auth)
+    d = workspace / "projects" / pid
+    (d / "video_work").mkdir()
+    np.zeros(16000 * 3, dtype=np.float32).tofile(d / "video_work" / "audio16k.f32")
+    srv.save_project(pid, {"media": {"video": {"file": "v.mp4", "ready": True, "info": {"duration": 3}}}})
+    words = [{"text": "Hello there. ", "s": 0.1, "e": 1.0}, {"text": "Yes. ", "s": 1.4, "e": 1.7},
+             {"text": "Bye now.", "s": 2.0, "e": 2.8}]
+
+    class FakeEngine:
+        def transcribe(self, wav, lang, ctx, progress, cancelled, note):
+            note("")
+            progress(1.0)
+            return {"language": "en", "words": words, "duration": 3.0, "aligned": 0.5}
+    monkeypatch.setattr(srv, "ENGINE", FakeEngine())
+
+    def wait(jid):
+        for _ in range(200):
+            j = jobs.get(jid)
+            if j.status != "running":
+                return j
+            import time
+            time.sleep(0.02)
+    # no API key: translation must be switched off explicitly
+    r = client.post(f"/api/projects/{pid}/generate", json={"translate": True}, headers=auth)
+    assert r.status_code == 400
+    jid = client.post(f"/api/projects/{pid}/generate", json={"translate": False}, headers=auth).json()["job"]
+    j = wait(jid)
+    assert j.status == "done", j.error
+    res = j.result
+    assert [c["src"] for c in res["segs"]] == ["Hello there.", "Yes.", "Bye now."]
+    assert res["aligned"] == 0.5 and res["usage"] is None and all(c["tgt"] == "" for c in res["segs"])
+    assert srv.load_project(pid)["job"]["result"]["segs"]                 # kept until the app acknowledges it
+
+    # with translation: proofread lines carry their original text, usage is reported and recorded
+    from app import config
+
+    class FakeTr:
+        def __init__(self, settings):
+            self.failed, self.fixes = [], {}
+            self.usage = {"requests": 1, "prompt": 10, "completion": 5, "cache_hit": 0}
+
+        def translate_all(self, cues, src, tgt, tone, opts, progress, cancelled):
+            self.fixes[2] = cues[2]["src"]
+            cues[2]["src"] = "Buy now."
+            return [f"T{i}" for i in range(len(cues))]
+    monkeypatch.setattr(srv, "Translator", FakeTr)
+    config.save_settings({"api_key": "sk-test-1234567890"})
+    j = wait(client.post(f"/api/projects/{pid}/generate", json={"translate": True}, headers=auth).json()["job"])
+    assert j.status == "done", j.error
+    segs = j.result["segs"]
+    assert segs[2]["src"] == "Buy now." and segs[2]["src_orig"] == "Bye now." and "src_orig" not in segs[0]
+    assert [c["tgt"] for c in segs] == ["T0", "T1", "T2"] and j.result["usage"]["prompt"] == 10
+    assert config.usage_month()["requests"] == 1
