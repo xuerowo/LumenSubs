@@ -72,3 +72,47 @@ def test_speech_regions():
     assert len(regs) == 1
     s, e = regs[0]
     assert abs(s - 50 * FRAME_SEC) < 0.1 and abs(e - 100 * FRAME_SEC) < 0.1
+
+
+# ---------------------------------------------------------------- repetition, hallucination, loading
+from app.asr import _install_loop_guard, clearly_other_script, collapse_repeats, friendly_load_error  # noqa: E402
+
+
+def test_collapse_repeats():
+    assert collapse_repeats("やめて、" * 16) == "やめて、やめて…"
+    assert collapse_repeats("あ" * 16) == "ああ…"
+    assert collapse_repeats("本当に本当に") == "本当に本当に"          # two repeats are speech, not a loop
+    assert collapse_repeats("10000 yen!!!!") == "10000 yen!!!!"        # digits / punctuation untouched
+
+
+def test_hallucinated_line_from_the_long_pass_is_trimmed():
+    lp = "今日はいい天気ですね。ご視聴ありがとうございました。"
+    assert pick_text(lp, "今日はいい天気ですね", (0, 3), []) == "今日はいい天気ですね。"
+    assert pick_text("ご視聴ありがとうございました。今日はいい天気ですね。", "今日はいい天気ですね", (0, 3), []) == "今日はいい天気ですね。"
+    assert pick_text("今日はいい天気ですね。", "今日はいい天気ですね", (0, 3), []) == "今日はいい天気ですね。"
+
+
+def test_clearly_other_script():
+    assert clearly_other_script("Thank you so much for watching", "Japanese")
+    assert not clearly_other_script("今日はいい天気", "Japanese")
+    assert not clearly_other_script("Thank you so much for watching", "English")
+
+
+def test_loop_guard_wraps_generate_and_reports_changed_internals():
+    from types import SimpleNamespace
+    seen = {}
+
+    def generate(*a, **kw):
+        seen.update(kw)
+        return "ok"
+    model = SimpleNamespace(model=SimpleNamespace(generate=generate))
+    assert _install_loop_guard(model)
+    assert model.model.generate(max_new_tokens=5) == "ok"
+    assert len(seen["stopping_criteria"]) == 1 and seen["max_new_tokens"] == 5
+    assert _install_loop_guard(SimpleNamespace()) is False     # qwen-asr changed shape: warn, don't crash
+
+
+def test_friendly_load_errors():
+    assert "顯示卡記憶體不足" in friendly_load_error(RuntimeError("CUDA out of memory. Tried to allocate"), "cuda")
+    assert "太舊" in friendly_load_error(RuntimeError("no kernel image is available"), "cuda")
+    assert "start.bat" in friendly_load_error(OSError("We couldn't find the files, offline mode"), "cpu")
